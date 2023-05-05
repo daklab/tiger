@@ -1,0 +1,10 @@
+.idea/
+.git/
+__pycache__
+data-processed/
+data-raw/
+essentiality/
+experiments/
+figures/
+meta-data/
+predictions/
