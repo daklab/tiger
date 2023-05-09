@@ -1,0 +1,3 @@
+[submodule "roc_comparison"]
+	path = roc_comparison
+	url = https://github.com/yandexdataschool/roc_comparison/
