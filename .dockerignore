@@ -1,5 +1,6 @@
 .idea/
 .git/
+.run/
 __pycache__
 data-processed/
 data-raw/
