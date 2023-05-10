@@ -45,7 +45,7 @@ tiger = build_model(name='Tiger2D',
 
 # train and save
 tiger = train_model(tiger, train_data, valid_data, args.batch_size)
-tiger.model.save(os.path.join('tiger', 'model'), overwrite=True, include_optimizer=False, save_format='tf')
+tiger.model.save(os.path.join('hugging-face', 'model'), overwrite=True, include_optimizer=False, save_format='tf')
 
 # measure performance
 df_tap = test_model(tiger, valid_data)
