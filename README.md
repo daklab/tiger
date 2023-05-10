@@ -11,8 +11,13 @@ Our environment is based upon TensorFlow's published Docker tag for version 2.11
 Our `Dockerfile` utilizes this image to create our Docker container, which also depends on the python packages listed in
 `requirements.txt`.
 
-Our code utilizes some [open source](https://github.com/yandexdataschool/roc_comparison/) code for our ROC analysis.
-We include their code and license in the `roc_comparison` directory.
+Our repository contains two submodules:
+- [Open source code](https://github.com/yandexdataschool/roc_comparison/) for ROC analysis. We submodule their code and license in the `roc_comparison` directory.
+- [Our hugging face code](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging-face` directory.
+When cloning are repository be sure to use the `--recursive option'
+``
+git clone --recursive git@github.com:daklab/tiger.git
+``
 
 ### Repository Overview
 
