@@ -14,10 +14,10 @@ Our `Dockerfile` utilizes this image to create our Docker container, which also 
 Our repository contains two submodules:
 - [Open source code](https://github.com/yandexdataschool/roc_comparison/) for ROC analysis. We submodule their code and license in the `roc_comparison` directory.
 - [Our hugging face code](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging-face` directory.
-When cloning are repository be sure to use the `--recursive option'
-``
-git clone --recursive git@github.com:daklab/tiger.git
-``
+When cloning are repository be sure to use the `--recursive option`. For example:
+```
+git clone --recursive https://github.com/daklab/tiger.git
+```
 
 ### Repository Overview
 
