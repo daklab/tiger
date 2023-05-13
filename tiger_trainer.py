@@ -5,7 +5,7 @@ import tensorflow as tf
 from data import label_and_filter_data, load_data, model_inputs
 from models import build_model, train_model, test_model
 from normalization import get_normalization_object
-from tiger.tiger import CONTEXT_5P, CONTEXT_3P
+from hugging_face.tiger import CONTEXT_5P, CONTEXT_3P
 
 # script arguments
 parser = utils.common_parser_arguments()
@@ -45,7 +45,7 @@ tiger = build_model(name='Tiger2D',
 
 # train and save
 tiger = train_model(tiger, train_data, valid_data, args.batch_size)
-tiger.model.save(os.path.join('hugging-face', 'model'), overwrite=True, include_optimizer=False, save_format='tf')
+tiger.model.save(os.path.join('hugging_face', 'model'), overwrite=True, include_optimizer=False, save_format='tf')
 
 # measure performance
 df_tap = test_model(tiger, valid_data)

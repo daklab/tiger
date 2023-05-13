@@ -2,5 +2,5 @@
 	path = roc_comparison
 	url = https://github.com/yandexdataschool/roc_comparison/
 [submodule "hugging-face"]
-	path = hugging-face
+	path = hugging_face
 	url = https://huggingface.co/spaces/Knowles-Lab/tiger

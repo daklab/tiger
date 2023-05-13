@@ -12,7 +12,7 @@ Our `Dockerfile` utilizes this image and additionally installs the python packag
 
 Our repository contains two submodules:
 - [Open source code](https://github.com/yandexdataschool/roc_comparison/) for ROC analysis. We submodule their code and license in the `roc_comparison` directory.
-- [Our hugging face code](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging-face` directory.
+- [Our hugging face code](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging_face` directory.
 
 When cloning our repository be sure to use the `--recursive` option to pull these submodules as well:
 ```
@@ -27,13 +27,13 @@ This web tool also provides the option to identify off-target effects (up to thr
 Checking for off-target effects greatly affects speed--we check all of gencode v19's coding and lncRNA transcripts for potential off-target effects.
 
 For faster performance, one can fork our hugging face repository and pay for upgraded compute.
-Alternatively, for those with local GPU resources, one can call `tiger.py` (located in the `hugging-face` submodule directory of this github repository) locally:
+Alternatively, for those with local GPU resources, one can call `tiger.py` (located in the `hugging_face` submodule directory of this github repository) locally:
 ```
 python tiger.py --fasta_path <path to a directory of fasta files> [--check_off_targets]
 ```
 The `--fasta_path` must be a directory of fasta files, where each file has one or more transcripts.
-Upon completion, `on_target.csv` (located in the `hugging-face` submodule directory of this github repository) will contain the ten most effective guides per transcript.
-If the `--check_off_targets` was used, `off_target.csv` (located in the `hugging-face` submodule directory) will contain potential off-target effects (up to three nucleotide substitutions) for all guides in `on_target.csv`.
+Upon completion, `on_target.csv` (located in the `hugging_face` submodule directory of this github repository) will contain the ten most effective guides per transcript.
+If the `--check_off_targets` was used, `off_target.csv` (located in the `hugging_face` submodule directory) will contain potential off-target effects (up to three nucleotide substitutions) for all guides in `on_target.csv`.
 
 ### Reproducing Experiments
 To reproduce our manuscript's figures please run `tiger_experiments.sh`.
