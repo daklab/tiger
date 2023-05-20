@@ -3,7 +3,7 @@ import utils
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from analysis import plot_performance, plot_performance_by_type, save_fig
+from analysis import plot_performance, plot_performance_by_type, save_fig, METRICS
 from data import load_data, label_and_filter_data
 from matplotlib import pyplot as plt
 from sklearn.metrics import confusion_matrix
@@ -189,6 +189,46 @@ def off_target_performance(holdout):
     save_fig(fig, os.path.join('figures', 'tiger'), 'off-target-' + holdout, '.svg')
 
 
+def performance_by_guide_type(holdout):
+    # load results
+    try:
+        # combined model
+        dir_combined = os.path.join('predictions', 'off-target', 'no_indels', holdout)
+        predictions = pd.read_pickle(os.path.join(dir_combined, 'predictions.pkl'))
+        predictions['Model'] = 'Ours (combined)'
+
+    except FileNotFoundError:
+        return None
+
+    # guide type performance
+    performance = utils.measure_guide_type_performance(predictions.set_index('Model'))
+
+    # guide order
+    performance.rename(columns={'guide_type': 'Guide type'}, inplace=True)
+    order = ['PM', 'SM', 'DM', 'RDM', 'TM', 'RTM', 'SI', 'CI', 'DI', 'SD', 'CD', 'DD']
+    [order.remove(gt) for gt in set(order) - set(performance['Guide type'].unique())]
+
+    # plot figure
+    metrics = performance[METRICS + ['Guide type']].melt(id_vars=['Guide type'], var_name='Metric')
+    performance.set_index(['Guide type'], inplace=True)
+    fig, ax = plt.subplots(figsize=(5, 5))
+    fig.suptitle('TIGER (combined) performance on: ' + holdout)
+    sns.barplot(data=metrics, x='Metric', y='value', order=METRICS, hue='Guide type', hue_order=order, ax=ax)
+    ax.legend(title='Guide type', loc='upper left')
+
+    # add error bars
+    for j, metric in enumerate(METRICS):
+        for i, idx in enumerate(performance.index.unique()):
+            x = ax.containers[i][j].get_x() + ax.containers[i][j].get_width() / 2
+            y = performance.loc[idx, metric]
+            error = performance.loc[idx, metric + ' err']
+            ax.errorbar(x=x, y=y, yerr=2 * error, color='black')
+
+    # finalize and save
+    plt.tight_layout()
+    save_fig(fig, os.path.join('figures', 'tiger'), 'guide-type-performance-' + holdout, '.svg')
+
+
 def delta_pearson_performance(holdout):
     if holdout == 'guides':
         return
@@ -351,6 +391,9 @@ if __name__ == '__main__':
     # ensure text is text in images
     plt.rcParams['figure.dpi'] = 300
     plt.rcParams['svg.fonttype'] = 'none'
+
+    # performance by guide type
+    performance_by_guide_type(holdout='flow-cytometry')
 
     # on-target and off-target performance plots
     for validation_strategy in ['genes', 'guides', 'targets', 'flow-cytometry']:
