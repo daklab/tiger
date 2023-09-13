@@ -7,6 +7,8 @@ import seaborn as sns
 from data import label_and_filter_data, load_data, sequence_complement, SCALAR_FEATS
 from matplotlib import pyplot as plt
 from scipy.stats import pearsonr
+from sklearn.metrics import confusion_matrix
+from utils import titration_ratio
 
 NUCLEOTIDES = ['A', 'C', 'T', 'G']
 METRICS = ['Pearson', 'Spearman', 'AUROC', 'AUPRC']
@@ -482,7 +484,7 @@ def sequence_pearson_and_shap(data: pd.DataFrame, df_shap: pd.DataFrame, mode: s
             mask = sequence_mask(data, guide_actual, target_nt)
             r = np.empty(mask.shape[1])
             for i in range(len(r)):
-                r[i] = pearsonr(mask[:, i], data['target_lfc'])[0]
+                r[i] = pearsonr(mask[:, i], data['observed_lfc'])[0]
 
             # E[SHAP | (guide,target) at i`th position]
             mask = sequence_mask(df_shap, guide_actual, target_nt)
@@ -609,7 +611,7 @@ def plot_non_sequence_pearson(dataset: str, data_sub_dir: str, holdout: str, fig
     # non-sequence feature Pearson values
     r = np.empty(len(available_features))
     for i, feature in enumerate(available_features):
-        r[i] = pearsonr(data[feature], data['target_lfc'])[0]
+        r[i] = pearsonr(data[feature], data['observed_lfc'])[0]
 
     # plot correlation values in descending order
     fig, ax = plt.subplots()
@@ -696,6 +698,37 @@ def cell_type_correction(df_cell_x, df_cell_y, values):
     return p, g.fig
 
 
+def normalization_performance(dataset: str, data_sub_dir: str, holdout: str):
+
+    # load predictions
+    exp_path = experiment_results_path(dataset, 'normalization', data_sub_dir, holdout)
+    try:
+        predictions = pd.read_pickle(os.path.join(exp_path, 'predictions.pkl'))
+    except FileNotFoundError:
+        return None
+
+    # set indices
+    index = ['normalization', 'normalization kwargs']
+    predictions = predictions.reset_index(index).set_index(index).sort_index()
+
+    # loop over normalization methods
+    performances = pd.DataFrame()
+    for index in predictions.index.unique():
+        pm_sm = predictions.loc[predictions.guide_type.isin({'PM', 'SM'})].loc[index].copy()
+        performance = utils.measure_performance(pm_sm, index=[index], silence=True)
+        df = titration_ratio(pm_sm, num_top_guides=10, correction=False)
+        bins = np.arange(0.2, 1.0, .2)
+        mtx = confusion_matrix(np.digitize(df['Observed ratio'], bins),
+                               np.digitize(df['Predicted ratio'], bins), normalize='pred')
+        performance['Trace'] = np.trace(mtx)
+        performances = pd.concat([performances, performance])
+
+    # save results
+    save_path = figure_save_path(dataset, 'normalization', data_sub_dir, holdout)
+    os.makedirs(save_path, exist_ok=True)
+    performances[['Trace', 'Slope'] + METRICS].to_csv(os.path.join(save_path, 'performance.csv'))
+
+
 if __name__ == '__main__':
 
     # ensure text is text in images
@@ -705,9 +738,9 @@ if __name__ == '__main__':
     # parser arguments
     parser = utils.common_parser_arguments()
     args = utils.parse_common_arguments(parser)
+    data_sub_directory = utils.data_directory(args.pm_only, args.indels, args.seq_only)
 
     # generate and save plots
-    data_sub_directory = utils.data_directory(args.pm_only, args.indels)
     plot_label_and_filter_results(args.dataset, data_sub_directory, args.holdout, args.fig_ext)
     plot_model_performances(args.dataset, data_sub_directory, args.holdout, args.fig_ext)
     plot_sequence_context_performances(args.dataset, data_sub_directory, args.holdout, args.fig_ext)
@@ -719,6 +752,9 @@ if __name__ == '__main__':
     # plot_non_sequence_pearson(args.dataset, data_sub_directory, args.holdout, args.fig_ext, pm_only=False)
     plot_non_sequence_effects(args.dataset, data_sub_directory, args.holdout, args.fig_ext, pm_only=True)
     plot_non_sequence_effects(args.dataset, data_sub_directory, args.holdout, args.fig_ext, pm_only=False)
+
+    # analyze normalization performance
+    normalization_performance(args.dataset, data_sub_directory, args.holdout)
 
     # show them
     plt.show()

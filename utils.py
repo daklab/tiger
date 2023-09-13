@@ -41,6 +41,8 @@ def common_parser_arguments():
     parser.add_argument('--nt_quantile', type=float, default=None, help='active guide non-targeting quantile threshold')
     parser.add_argument('--pm_only', action='store_true', default=False, help='use only perfect match guides')
     parser.add_argument('--use_guide_seq', action='store_true', default=False, help='use guide sequence for PM only')
+    parser.add_argument('--seed', type=int, default=None, help='random number seed')
+    parser.add_argument('--seq_only', action='store_true', default=False, help='sequence only model')
 
     return parser
 
@@ -52,7 +54,7 @@ def parse_common_arguments(parser: argparse.ArgumentParser, dataset_parameter_ov
 
     # dataset-specific defaults
     dataset = dataset_parameter_override or args.dataset
-    if dataset == 'off-target':
+    if dataset in {'off-target', 'flow-cytometry'}:
         args.context = args.context or '(1,1)'
         args.filter_method = args.filter_method or 'NoFilter'
         args.kwargs = args.kwargs or '{}'  # "{'features': []}"
@@ -61,14 +63,14 @@ def parse_common_arguments(parser: argparse.ArgumentParser, dataset_parameter_ov
         args.normalization = args.normalization or 'FrequentistQuantile'
         args.normalization_kwargs = args.normalization_kwargs or "{'q_loc': 50, 'q_neg': 10, 'q_pos': 90}"
         args.nt_quantile = args.nt_quantile or 0.01
-    elif dataset == 'junction':
-        args.context = args.context or '(0,5)'
+    elif 'junction' in dataset:
+        args.context = args.context or '(1,1)'
         args.filter_method = args.filter_method or 'MinActiveRatio'
         args.kwargs = args.kwargs or '{}'  # "{'features': []}"
-        args.min_active_ratio = args.min_active_ratio or 0.15
+        args.min_active_ratio = args.min_active_ratio or 0.05
         args.model = args.model or 'Tiger1D'
         args.normalization = args.normalization or 'No'
-        args.normalization_kwargs = args.normalization_kwargs or '{}'
+        args.normalization_kwargs = args.normalization_kwargs or "{}"
         args.nt_quantile = args.nt_quantile or 0.01
     else:
         assert args.context is not None
@@ -87,8 +89,11 @@ def parse_common_arguments(parser: argparse.ArgumentParser, dataset_parameter_ov
         else:
             raise NotImplementedError
 
-    # if data-set only has PM guides, force PM-only flag
-    if hasattr(args, 'dataset') and set(load_data(args.dataset)[0]['guide_type'].unique()) == {'PM'}:
+    # check if dataset only contains PM guides
+    pm_only = set(load_data(args.dataset)[0]['guide_type'].unique()) == {'PM'}
+
+    # if dataset only has PM guides, force PM-only flag
+    if hasattr(args, 'dataset') and pm_only:
         args.pm_only = True
 
     # process kwargs string descriptor into a dictionary that is usable by python
@@ -98,139 +103,180 @@ def parse_common_arguments(parser: argparse.ArgumentParser, dataset_parameter_ov
         args.normalization_kwargs = string_to_dict(args.normalization_kwargs)
 
     # if dataset has mismatches guides, then guide sequence is required
-    if not args.pm_only and set(load_data(args.dataset)[0]['guide_type'].unique()) != {'PM'}:
+    if not args.pm_only and not pm_only:
         args.use_guide_seq = True
 
     return args
 
 
-def data_directory(pm_only: bool, indels: bool):
+def data_directory(pm_only: bool, indels: bool, seq_only: bool):
     if pm_only:
-        return 'pm'
+        directory = 'pm'
     elif indels:
-        return 'indels'
+        directory = 'indels'
     else:
-        return 'no_indels'
+        directory = 'no_indels'
+    if seq_only:
+        directory += '-seq_only'
+    return directory
 
 
 def total_least_squares_slope(x: np.array, y: np.array):
+    """
+    1-dimensional total least squares slope
+    :param x: independent univariate variable
+    :param y: dependent univariate variable
+    :return: slope
+    """
     u, s, v = np.linalg.svd(np.stack([x, y], axis=-1), full_matrices=False)
     return -v[1, 0] / v[1, 1]
 
 
-def regression_metrics(target_lfc, predicted_lfc=None, predicted_label_likelihood=None):
+def titration_ratio(df: pd.DataFrame, num_top_guides: int, correction: bool = False, transpose: bool =False):
+
+    # total least squares slope correction
+    if correction:
+        x_name = 'predicted_lfc'
+        y_name = 'observed_lfc'
+        for guide_type in {'PM', 'SM'}:
+            x = df.loc[df.guide_type == guide_type, x_name].to_numpy()
+            y = df.loc[df.guide_type == guide_type, y_name].to_numpy()
+            slope = total_least_squares_slope(x, y)
+            df.loc[df.guide_type == guide_type, x_name] = slope * df.loc[df.guide_type == guide_type, x_name]
+
+    # keep PM and SM guides for high confidence essential genes only
+    essential_genes = df.loc[df.guide_type == 'PM'].groupby('gene')['observed_label'].sum()
+    essential_genes = essential_genes.index.values[essential_genes > 6]
+    df = df.loc[df.guide_type.isin({'PM', 'SM'}) & df.gene.isin(essential_genes)].copy()
+
+    # only titer the top guides per transcript
+    targets = []
+    for gene in df['gene'].unique():
+        index = (df.gene == gene) & (df.guide_type == 'PM')
+        predictions = df.loc[index, 'predicted_lfc'].sort_values(ascending=not transpose).to_numpy()
+        threshold = predictions[min(num_top_guides - 1, len(predictions) - 1)]
+        if transpose:
+            targets += df.loc[index & (df.predicted_lfc >= threshold), 'target_seq'].to_list()
+        else:
+            targets += df.loc[index & (df.predicted_lfc <= threshold), 'target_seq'].to_list()
+    df = df.loc[df.target_seq.isin(targets)].copy()
+
+    # loop over target sites
+    for target in df['target_seq'].unique():
+
+        # target titration
+        df.loc[df.target_seq == target, 'Observed ratio'] = 0
+        index = (df.target_seq == target)
+        df.loc[index, 'Observed ratio'] = df.loc[index, 'observed_lfc'].rank(ascending=False, pct=True)
+        z = df.loc[index & (df.guide_type == 'PM'), 'Observed ratio'].to_numpy()
+        df.loc[index, 'Observed ratio'] /= z
+
+        # predicted titration
+        df.loc[df.target_seq == target, 'Predicted ratio'] = 0
+        index = (df.target_seq == target)
+        df.loc[index, 'Predicted ratio'] = df.loc[index, 'predicted_lfc'].rank(ascending=transpose, pct=True)
+        z = df.loc[index & (df.guide_type == 'PM'), 'Predicted ratio'].to_numpy()
+        df.loc[index, 'Predicted ratio'] /= z
+
+    return df
+
+
+def regression_metrics(observations: pd.Series, predictions: pd.Series):
     """
     Compute regression metrics
-    :param target_lfc: target LFC
-    :param predicted_lfc: predicted LFC
-    :param predicted_label_likelihood: predicted label
+    :param observations: observed variable
+    :param predictions: predicted variable
     :return: Pearson/Spearman correlation coefficients and their standard errors
     """
-    assert not (predicted_label_likelihood is None and predicted_lfc is None)
-
-    # if predicted LFCs are absent, use negative label likelihood (a high label likelihood implies a more negative LFC)
-    if predicted_lfc is None:
-        predicted_lfc = -predicted_label_likelihood
-
     # remove NaNs if they exist
-    i_nan = np.isnan(target_lfc) | np.isnan(predicted_lfc)
-    target_lfc = target_lfc[~i_nan]
-    predicted_lfc = predicted_lfc[~i_nan]
+    i_nan = np.isnan(observations) | np.isnan(predictions)
+    observed_lfc = observations[~i_nan]
+    predicted_lfc = predictions[~i_nan]
 
     # compute calibration metrics
-    slope = total_least_squares_slope(predicted_lfc, target_lfc)
+    slope = total_least_squares_slope(predicted_lfc, observed_lfc)
 
     # compute metrics and their standard errors
-    n = len(target_lfc)
-    pearson = pearsonr(target_lfc, predicted_lfc)[0]
+    n = len(observed_lfc)
+    pearson = pearsonr(observed_lfc, predicted_lfc)[0]
     pearson_err = np.sqrt((1 - pearson ** 2) / (n - 2))
-    spearman = spearmanr(target_lfc, predicted_lfc)[0]
+    spearman = spearmanr(observed_lfc, predicted_lfc)[0]
     spearman_err = np.sqrt((1 - spearman ** 2) / (n - 2))
 
     return slope, pearson, pearson_err, spearman, spearman_err
 
 
-def roc_and_prc_from_lfc(target_label, predicted_label_likelihood=None, predicted_lfc=None):
+def roc_and_prc_from_lfc(observed_label: pd.Series, predictions: pd.Series):
     """
     Compute ROC and PRC points
-    :param target_label: target response
-    :param predicted_label_likelihood: predicted label
-    :param predicted_lfc: predicted LFC
+    :param observed_label: observed response
+    :param predictions: predictions
     :return: ROC and PRC
     """
-    if target_label is None or len(np.unique(target_label)) != 2:
+    if observed_label is None or len(np.unique(observed_label)) != 2:
         return (None, None), (None, None)
-    assert not (predicted_label_likelihood is None and predicted_lfc is None)
 
-    # if predicted labels are absent, use negative LFC (a highly negative LFC implies a positive label)
-    if predicted_label_likelihood is None:
-        predicted_label_likelihood = np.sign(pearsonr(predicted_lfc, target_label)[0]) * predicted_lfc
+    # ensure predictions positively correlate with labels or metrics will break (e.g. LFC needs to be sign flipped)
+    predictions = np.sign(pearsonr(predictions, observed_label)[0]) * predictions
 
     # ROC and PRC values
-    fpr, tpr, _ = roc_curve(target_label, predicted_label_likelihood)
-    precision, recall, _ = precision_recall_curve(target_label, predicted_label_likelihood)
+    fpr, tpr, _ = roc_curve(observed_label, predictions)
+    precision, recall, _ = precision_recall_curve(observed_label, predictions)
 
     return (fpr, tpr), (precision, recall)
 
 
-def classification_metrics(target_label, predicted_label_likelihood=None, predicted_lfc=None, n_bootstraps=100):
+def classification_metrics(observed_label: pd.Series, predictions: pd.Series, n_bootstraps=100):
     """
     Compute classification metrics
-    :param target_label: target response
-    :param predicted_label_likelihood: predicted label
-    :param predicted_lfc: predicted LFC
+    :param observed_label: observed response
+    :param predictions: predictions
     :param n_bootstraps: number of bootstraps used to estimate AUPRC standard error
     :return: AUROC, AUPRC
     """
-    if target_label is None or len(np.unique(target_label)) != 2:
+    if observed_label is None or len(np.unique(observed_label)) != 2:
         return None, None, None, None
 
     # ROC and PRC
-    (fpr, tpr), (precision, recall) = roc_and_prc_from_lfc(target_label, predicted_label_likelihood, predicted_lfc)
+    (fpr, tpr), (precision, recall) = roc_and_prc_from_lfc(observed_label, predictions)
 
     # area under the above curves
     auroc = auc(fpr, tpr)
     auprc = auc(recall, precision)
 
     # compute AUROC standard errors
-    if predicted_label_likelihood is None:
-        predicted_label_likelihood = np.sign(pearsonr(predicted_lfc, target_label)[0]) * predicted_lfc
-    auroc_delong, auroc_var = delong_roc_variance(target_label.to_numpy().astype(float),
-                                                  predicted_label_likelihood.to_numpy())
+    predictions = np.sign(pearsonr(predictions, observed_label)[0]) * predictions
+    auroc_delong, auroc_var = delong_roc_variance(observed_label.to_numpy().astype(float), predictions.to_numpy())
     auroc_err = auroc_var ** 0.5
 
     # bootstrap estimate AUPRC standard errors
-    df_bootstrap = pd.DataFrame.from_dict({'target_label': target_label,
-                                           'predicted_label_likelihood':predicted_label_likelihood})
+    df_bootstrap = pd.DataFrame.from_dict({'observed_label': observed_label, 'predictions': predictions})
     auprc_samples = np.empty(n_bootstraps)
     for n in range(n_bootstraps):
         df_sample = df_bootstrap.sample(len(df_bootstrap), replace=True)
-        precision, recall, _ = precision_recall_curve(df_sample['target_label'],
-                                                      df_sample['predicted_label_likelihood'])
+        precision, recall, _ = precision_recall_curve(df_sample['observed_label'], df_sample['predictions'])
         auprc_samples[n] = auc(recall, precision)
     auprc_err = auprc_samples.std()
 
     return auroc, auroc_err, auprc, auprc_err
 
 
-def measure_performance(df_tap, index=None, silence=False):
+def measure_performance(df: pd.DataFrame, index=None, obs_var='observed_lfc', pred_var='predicted_lfc', silence=False):
     """
     Compute performance metrics over the provided predictions
-    :param df_tap: DataFrame of targets and predictions
+    :param df: DataFrame of targets and predictions
     :param index: an optional index for the returned DataFrame
+    :param obs_var: observed variable name
+    :param pred_var: predicted variable name
     :param silence: whether to silence printing performance
     :return: DataFrame of performance metrics
     """
-    # pack predictions into a dictionary (either can be None depending on model, but subsequent functions handle that)
-    predictions = {'predicted_lfc': df_tap.get('predicted_lfc'),
-                   'predicted_label_likelihood': df_tap.get('predicted_label_likelihood')}
-
     # compute metrics
-    slope, r, r_err, rho, rho_err = regression_metrics(df_tap['target_lfc'], **predictions)
-    auroc, auroc_err, auprc, auprc_err = classification_metrics(df_tap.get('target_label'), **predictions)
+    slope, r, r_err, rho, rho_err = regression_metrics(df[obs_var], df[pred_var])
+    auroc, auroc_err, auprc, auprc_err = classification_metrics(df.get('observed_label'), df[pred_var])
 
     # generate ROC and PRC curves
-    (fpr, tpr), (precision, recall) = roc_and_prc_from_lfc(df_tap.get('target_label'), **predictions)
+    (fpr, tpr), (precision, recall) = roc_and_prc_from_lfc(df.get('observed_label'), df[pred_var])
 
     # pack performance into a dataframe
     df = pd.DataFrame({
@@ -264,53 +310,63 @@ def statistical_tests(reference_model, performance, predictions, n_bootstraps=10
     :param n_bootstraps: number of bootstraps for AUPRC significance
     :return: modified performance with p-values added
     """
-    # reference model bootstrap samples
-    auprc_ref = np.empty(n_bootstraps)
-    df_reference = predictions.loc[reference_model]
-    for n in range(n_bootstraps):
-        df_sample = df_reference.sample(len(df_reference), replace=True)
-        precision, recall, _ = precision_recall_curve(df_sample['target_label'], -df_sample['predicted_lfc'])
-        auprc_ref[n] = auc(recall, precision)
-
     # loop over alternative models
     for alternative_model in set(performance.index.unique()) - {reference_model}:
 
         # align targets and predictions for the two hypothesis
-        df = pd.merge(predictions.loc[reference_model, ['guide_seq', 'target_label', 'predicted_lfc']],
-                      predictions.loc[alternative_model, ['guide_seq', 'target_label', 'predicted_lfc']],
-                      on=['guide_seq', 'target_label'], suffixes=('_ref', '_alt'))
+        df = pd.merge(predictions.loc[reference_model, ['guide_seq', 'predicted_lfc']],
+                      predictions.loc[alternative_model, ['guide_seq', 'predicted_lfc']],
+                      on=['guide_seq'], suffixes=('_ref', '_alt'))
 
-        # loop over correlations
+        # Steiger's test for Pearson and Spearman correlations
         for correlation, f_corr in [('Pearson', pearsonr), ('Spearman', spearmanr)]:
+            if correlation in performance.columns:
+                r1 = performance.loc[reference_model, correlation]
+                r2 = performance.loc[alternative_model, correlation]
+                r12 = abs(f_corr(df['predicted_lfc_ref'], df['predicted_lfc_alt'])[0])
+                n = len(predictions)
+                z1 = 0.5 * (np.log(1 + r1) - np.log(1 - r1))
+                z2 = 0.5 * (np.log(1 + r2) - np.log(1 - r2))
+                rm2 = (r1 ** 2 + r2 ** 2) / 2
+                f = (1 - r12) / 2 / (1 - rm2)
+                h = (1 - f * rm2) / (1 - rm2)
+                z = abs(z1 - z2) * ((n - 3) / (2 * (1 - r12) * h)) ** 0.5
+                log10_p = (norm.logcdf(-z) + np.log(2)) / np.log10(np.e)
+                performance.loc[alternative_model, correlation + ' log10(p)'] = log10_p
 
-            # Steiger's test
-            r1 = performance.loc[reference_model, correlation]
-            r2 = performance.loc[alternative_model, correlation]
-            r12 = abs(f_corr(df['predicted_lfc_ref'], df['predicted_lfc_alt'])[0])
-            n = len(predictions)
-            z1 = 0.5 * (np.log(1 + r1) - np.log(1 - r1))
-            z2 = 0.5 * (np.log(1 + r2) - np.log(1 - r2))
-            rm2 = (r1 ** 2 + r2 ** 2) / 2
-            f = (1 - r12) / 2 / (1 - rm2)
-            h = (1 - f * rm2) / (1 - rm2)
-            z = abs(z1 - z2) * ((n - 3) / (2 * (1 - r12) * h)) ** 0.5
-            log10_p = (norm.logcdf(-z) + np.log(2)) / np.log10(np.e)
-            performance.loc[alternative_model, correlation + ' log10(p)'] = log10_p
+    # do we have observed activity labels
+    if 'observed_label' in predictions.columns:
 
-        # DeLong's test
-        log10_p = delong_roc_test(
-            ground_truth=df['target_label'].to_numpy().astype(float),
-            predictions_one=df['predicted_lfc_ref'].to_numpy(),
-            predictions_two=df['predicted_lfc_alt'].to_numpy())
-        performance.loc[alternative_model, 'AUROC log10(p)'] = log10_p[0][0]
-
-        # bootstrap KS test
-        auprc_alt = np.empty(n_bootstraps)
+        # reference model AUPRC bootstrap samples
+        auprc_ref = np.empty(n_bootstraps)
+        df_reference = predictions.loc[reference_model]
         for n in range(n_bootstraps):
-            df_sample = df.sample(len(df), replace=True)
-            precision, recall, _ = precision_recall_curve(df_sample['target_label'], -df_sample['predicted_lfc_alt'])
-            auprc_alt[n] = auc(recall, precision)
-        performance.loc[alternative_model, 'AUPRC log10(p)'] = np.log10(ks_2samp(auprc_ref, auprc_alt)[1])
+            df_sample = df_reference.sample(len(df_reference), replace=True)
+            precision, recall, _ = precision_recall_curve(df_sample['observed_label'], -df_sample['predicted_lfc'])
+            auprc_ref[n] = auc(recall, precision)
+
+        # loop over alternative models
+        for alternative_model in set(performance.index.unique()) - {reference_model}:
+
+            # align targets and predictions for the two hypothesis
+            df = pd.merge(predictions.loc[reference_model, ['guide_seq', 'observed_label', 'predicted_lfc']],
+                          predictions.loc[alternative_model, ['guide_seq', 'observed_label', 'predicted_lfc']],
+                          on=['guide_seq', 'observed_label'], suffixes=('_ref', '_alt'))
+
+            # DeLong's AUROC test
+            log10_p = delong_roc_test(
+                ground_truth=df['observed_label'].to_numpy().astype(float),
+                predictions_one=df['predicted_lfc_ref'].to_numpy(),
+                predictions_two=df['predicted_lfc_alt'].to_numpy())
+            performance.loc[alternative_model, 'AUROC log10(p)'] = log10_p[0][0]
+
+            # bootstrap AUPRC KS test
+            auprc_alt = np.empty(n_bootstraps)
+            for n in range(n_bootstraps):
+                df_sample = df.sample(len(df), replace=True)
+                p, r, _ = precision_recall_curve(df_sample['observed_label'], -df_sample['predicted_lfc_alt'])
+                auprc_alt[n] = auc(r, p)
+            performance.loc[alternative_model, 'AUPRC log10(p)'] = np.log10(ks_2samp(auprc_ref, auprc_alt)[1])
 
     return performance
 

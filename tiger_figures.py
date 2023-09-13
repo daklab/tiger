@@ -14,13 +14,13 @@ def replicate_performance(data):
     # using a held-out replicate predict mean({replicates} \ held-out replicate)
     predictions = pd.DataFrame()
     for replicate in ['lfc_r1', 'lfc_r2', 'lfc_r3']:
-        target_lfc = data[list({'lfc_r1', 'lfc_r2', 'lfc_r3'} - {replicate})].mean(axis=1)
-        target_label = data['target_label']
+        observed_lfc = data[list({'lfc_r1', 'lfc_r2', 'lfc_r3'} - {replicate})].mean(axis=1)
+        observed_label = data['observed_label']
         predicted_lfc = data[replicate]
-        keep = ~target_lfc.isna() & ~predicted_lfc.isna()
+        keep = ~observed_lfc.isna() & ~predicted_lfc.isna()
         predictions = pd.concat([predictions, pd.DataFrame({
-            'target_lfc': target_lfc[keep],
-            'target_label': target_label[keep],
+            'observed_lfc': observed_lfc[keep],
+            'observed_label': observed_label[keep],
             'predicted_lfc': predicted_lfc[keep]
         })])
 
@@ -45,12 +45,12 @@ def others_pm_performance(test_set):
 
     # relevant columns
     index_cols = ['gene', 'guide_seq']
-    lfc_cols = ['target_lfc', 'target_label', 'predicted_lfc']
+    lfc_cols = ['observed_lfc', 'observed_label', 'predicted_lfc']
 
     # load dataset and make sure our forthcoming assumptions hold
     data = load_data(test_set, pm_only=True)
     data = label_and_filter_data(*data, nt_quantile=0.01, method='NoFilter')
-    data = data[['gene', 'guide_id', 'guide_seq', 'target_lfc', 'target_label']]
+    data = data[['gene', 'guide_id', 'guide_seq', 'observed_lfc', 'observed_label']]
     assert len(data) == data['guide_seq'].nunique()
 
     # Wessels predictions
@@ -60,10 +60,10 @@ def others_pm_performance(test_set):
         del pred_wessels['Guide_Name']
         pred_wessels.rename(columns={
             'Gene_Holdout': 'gene',
-            'normCS.D30': 'target_lfc',
+            'normCS.D30': 'observed_lfc',
             'predicted': 'predicted_lfc'}, inplace=True)
         pred_wessels.set_index(['gene', 'guide_id'], inplace=True)
-        pred_wessels = pred_wessels.join(data.set_index(['gene', 'guide_id'])[['guide_seq', 'target_label']])
+        pred_wessels = pred_wessels.join(data.set_index(['gene', 'guide_id'])[['guide_seq', 'observed_label']])
         pred_wessels = pred_wessels.reset_index()[index_cols + lfc_cols]
     else:
         pred_wessels = pd.DataFrame()
@@ -120,7 +120,7 @@ def others_pm_performance(test_set):
     return performance, predictions
 
 
-def on_target_performance(holdout):
+def on_target_performance(fig_path: str, fig_ext: str, holdout: str):
 
     # load our results
     try:
@@ -158,10 +158,10 @@ def on_target_performance(holdout):
     # plot performance
     title = 'On-target Performance: ' + holdout
     fig = plot_performance(performance, predictions, hue='Model', null='Ours (combined)', title=title)
-    save_fig(fig, os.path.join('figures', 'tiger'), 'on-target-' + holdout, '.svg')
+    save_fig(fig, fig_path, 'on-target-' + holdout, fig_ext)
 
 
-def off_target_performance(holdout):
+def off_target_performance(fig_path: str, fig_ext: str, holdout: str):
 
     # load results
     try:
@@ -186,10 +186,10 @@ def off_target_performance(holdout):
     title = 'Off-target Performance: ' + holdout
     fig = plot_performance_by_type(performance[performance.guide_type != 'PM'], 'Ours (combined)', title)
     plt.tight_layout()
-    save_fig(fig, os.path.join('figures', 'tiger'), 'off-target-' + holdout, '.svg')
+    save_fig(fig, fig_path, 'off-target-' + holdout, fig_ext)
 
 
-def performance_by_guide_type(holdout):
+def performance_by_guide_type(fig_path: str, fig_ext: str, holdout: str):
     # load results
     try:
         # combined model
@@ -226,10 +226,10 @@ def performance_by_guide_type(holdout):
 
     # finalize and save
     plt.tight_layout()
-    save_fig(fig, os.path.join('figures', 'tiger'), 'guide-type-performance-' + holdout, '.svg')
+    save_fig(fig, fig_path, 'guide-type-performance-' + holdout, fig_ext)
 
 
-def delta_pearson_performance(holdout):
+def delta_pearson_performance(fig_path: str, fig_ext: str, holdout: str):
     if holdout == 'guides':
         return
 
@@ -248,7 +248,7 @@ def delta_pearson_performance(holdout):
     performance = utils.measure_guide_type_performance(predictions)
 
     # guide-type delta performance
-    predictions['target_lfc'] -= predictions['target_pm_lfc']
+    predictions['observed_lfc'] -= predictions['observed_pm_lfc']
     predictions['predicted_lfc'] -= predictions['predicted_pm_lfc']
     delta_performance = utils.measure_guide_type_performance(predictions[predictions.guide_type != 'PM'])
 
@@ -264,17 +264,17 @@ def delta_pearson_performance(holdout):
     ax.set_title('Delta Pearson: ' + holdout)
     ax.set_ylim([0, 1])
     plt.tight_layout()
-    save_fig(fig, os.path.join('figures', 'tiger'), 'delta-' + holdout, '.svg')
+    save_fig(fig, fig_path, 'delta-' + holdout, fig_ext)
 
 
 def compute_titration_ratios(df_tap):
 
     # compute titration ratios
-    df_tap['Observed ratio'] = 2 ** -(df_tap['target_lfc_normalized'] - df_tap['target_pm_lfc_normalized'])
+    df_tap['Observed ratio'] = 2 ** -(df_tap['observed_lfc_normalized'] - df_tap['observed_pm_lfc_normalized'])
     df_tap['Predicted ratio'] = 2 ** -(df_tap['predicted_lfc_normalized'] - df_tap['predicted_pm_lfc_normalized'])
 
     # index for SM guides with active targets
-    active_targets = df_tap.loc[(df_tap.guide_type == 'PM') & (df_tap.target_label == 1), 'target_seq']
+    active_targets = df_tap.loc[(df_tap.guide_type == 'PM') & (df_tap.observed_label == 1), 'target_seq']
     df_tap = df_tap.loc[df_tap.target_seq.isin(active_targets) & df_tap.guide_type.isin({'SM'})].copy()
 
     # scale ratios to [0, 1] for SM guides with active targets
@@ -318,7 +318,7 @@ def titration_confusion_matrix(df_tap, title):
     return fig
 
 
-def titration_performance():
+def titration_performance(fig_path: str, fig_ext: str):
 
     # load results
     try:
@@ -347,12 +347,12 @@ def titration_performance():
 
     # plot titration performance
     fig_hek = titration_confusion_matrix(predictions_hek, title='SM Titration: HEK293')
-    save_fig(fig_hek, os.path.join('figures', 'tiger'), 'titration_hek', '.svg')
+    save_fig(fig_hek, fig_path, 'titration_hek', fig_ext)
     fig_hap = titration_confusion_matrix(predictions_hap, title='SM Titration: HAP1')
-    save_fig(fig_hap, os.path.join('figures', 'tiger'), 'titration_hap', '.svg')
+    save_fig(fig_hap, fig_path, 'titration_hap', fig_ext)
 
 
-def plot_training_set_differences():
+def plot_training_set_differences(fig_path: str, fig_ext: str):
 
     # load relevant files
     predictions_train_flow_dir = os.path.join('predictions', 'flow-cytometry', 'no_indels', 'off-target')
@@ -379,7 +379,7 @@ def plot_training_set_differences():
 
     # plot performance
     fig = plot_performance(performance, predictions, hue='Training', null='this screen', title='Dataset differences')
-    save_fig(fig, os.path.join('figures', 'tiger', 'no_indels'), 'dataset_differences', '.svg')
+    save_fig(fig, fig_path, 'dataset_differences', fig_ext)
 
 
 if __name__ == '__main__':
@@ -388,19 +388,24 @@ if __name__ == '__main__':
     plt.rcParams['figure.dpi'] = 300
     plt.rcParams['svg.fonttype'] = 'none'
 
+    # custom off-target figure directory
+    figure_path = os.path.join('figures', 'off-target', 'custom')
+    os.makedirs(figure_path, exist_ok=True)
+    figure_ext = '.pdf'
+
     # performance by guide type
-    performance_by_guide_type(holdout='flow-cytometry')
+    performance_by_guide_type(figure_path, figure_ext, holdout='flow-cytometry')
 
     # on-target and off-target performance plots
     for validation_strategy in ['genes', 'guides', 'targets', 'flow-cytometry']:
-        on_target_performance(holdout=validation_strategy)
-        off_target_performance(holdout=validation_strategy)
-        delta_pearson_performance(holdout=validation_strategy)
+        on_target_performance(figure_path, figure_ext, holdout=validation_strategy)
+        off_target_performance(figure_path, figure_ext, holdout=validation_strategy)
+        delta_pearson_performance(figure_path, figure_ext, holdout=validation_strategy)
 
     # titration performance plots
-    titration_performance()
+    titration_performance(figure_path, figure_ext)
 
     # dataset differences plot
-    plot_training_set_differences()
+    plot_training_set_differences(figure_path, figure_ext)
 
     plt.show()

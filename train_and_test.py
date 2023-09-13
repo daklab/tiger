@@ -10,8 +10,6 @@ from normalization import get_normalization_object
 # script arguments
 parser = utils.common_parser_arguments()
 parser.add_argument('--mm_only', action='store_true', default=False, help='use only mismatched guides')
-parser.add_argument('--seed', type=int, default=None, help='random number seed')
-parser.add_argument('--seq_only', action='store_true', default=False, help='sequence only model')
 parser.add_argument('--test_dataset', type=str, default=None, help='optional held out test set')
 parser.add_argument('--test_filter_method', type=str, default='NoFilter', help='gene filtering method for test set')
 args = utils.parse_common_arguments(parser)
@@ -28,8 +26,8 @@ available_features = set(SCALAR_FEATS).intersection(set(data.columns))
 data['fold'] = np.random.choice(np.array(['training', 'validation']), p=[0.9, 0.1], size=len(data))
 
 # normalize data
-normalizer = get_normalization_object(args.normalization)(data=data, **args.normalization_kwargs)
-data = normalizer.normalize(data)
+normalizer = get_normalization_object(args.normalization)(data, **args.normalization_kwargs)
+data = normalizer.normalize_targets(data)
 
 # set up test set similarly, if requested
 if args.test_dataset:
@@ -37,8 +35,8 @@ if args.test_dataset:
     test_data = label_and_filter_data(*test_data, args.nt_quantile, args.test_filter_method)
     available_features = available_features.intersection(set(test_data.columns))
     if set(LFC_COLS).issubset(test_data.columns):
-        test_set_normalizer = get_normalization_object(args.normalization)(data=test_data, **args.normalization_kwargs)
-        test_data = test_set_normalizer.normalize(test_data)
+        test_set_normalizer = get_normalization_object(args.normalization)(test_data, **args.normalization_kwargs)
+        test_data = test_set_normalizer.normalize_targets(test_data)
     else:
         test_set_normalizer = None
 else:
@@ -59,8 +57,6 @@ train_data = model_inputs(data[data.fold == 'training'], args.context, scalar_fe
 valid_data = model_inputs(data[data.fold == 'validation'], args.context, scalar_feats=available_features)
 
 # build, train, and test model
-if args.seed is not None:
-    tf.keras.utils.set_random_seed(args.seed)
 model = build_model(name=args.model,
                     target_len=train_data['target_tokens'].shape[1],
                     context_5p=train_data['5p_tokens'].shape[1],
@@ -74,7 +70,7 @@ model = train_model(model, train_data, valid_data, args.batch_size)
 df_tap = test_model(model, valid_data)
 
 # undo gene normalization
-df_tap = normalizer.denormalize(df_tap)
+df_tap = normalizer.denormalize_targets_and_predictions(df_tap)
 
 # measure performance
 print('Validation performance:')
@@ -84,19 +80,17 @@ utils.measure_performance(df_tap)
 if test_data is not None:
 
     # setup output directory
-    sub_dir = 'mm' if args.mm_only else utils.data_directory(args.pm_only, args.indels)
+    sub_dir = 'mm' if args.mm_only else utils.data_directory(args.pm_only, args.indels, args.seq_only)
     pred_path = os.path.join('predictions', args.dataset, sub_dir, args.test_dataset)
     os.makedirs(pred_path, exist_ok=True)
 
     # get normalized predictions
-    normalized_columns = ['target_lfc', 'target_pm_lfc', 'predicted_lfc', 'predicted_pm_lfc']
+    normalized_columns = ['observed_lfc', 'observed_pm_lfc', 'predicted_lfc', 'predicted_pm_lfc']
     df_tap = test_model(model, model_inputs(test_data, args.context, scalar_feats=available_features))
 
     # if we have a test set normalizer
     if test_set_normalizer is not None:
-        df_tap = pd.merge(df_tap, test_set_normalizer.denormalize(df_tap),
-                          on=['gene', 'target_seq', 'guide_seq', 'guide_type', 'target_label'],
-                          suffixes=('_normalized', ''))
+        df_tap = test_set_normalizer.denormalize_targets_and_predictions(df_tap)
         print('Test performance:')
         df_performance = utils.measure_performance(df_tap)
         df_performance.to_pickle(os.path.join(pred_path, 'performance.pkl'))

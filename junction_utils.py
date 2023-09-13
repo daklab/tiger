@@ -6,18 +6,18 @@ import pandas as pd
 def construct_junctions(data, reduce):
     # convert to junction data
     data['junction_seq'] = data['5p_context'] + data['target_seq'] + data['3p_context']
-    data_junction_group_by = data[['junction_seq', 'target_lfc', 'target_label']].groupby('junction_seq')
-    data_junction = pd.DataFrame(data_junction_group_by['target_lfc'].nsmallest(n=4).groupby('junction_seq').mean())
-    data_junction = data_junction.join(data_junction_group_by[['target_label']].mean() >= 0.25)
-    data_junction.rename(columns=dict(target_lfc='junction_lfc', target_label='junction_label'), inplace=True)
+    data_junction_group_by = data[['junction_seq', 'observed_lfc', 'observed_label']].groupby('junction_seq')
+    data_junction = pd.DataFrame(data_junction_group_by['observed_lfc'].nsmallest(n=4).groupby('junction_seq').mean())
+    data_junction = data_junction.join(data_junction_group_by[['observed_label']].mean() >= 0.25)
+    data_junction.rename(columns=dict(observed_lfc='junction_lfc', observed_label='junction_label'), inplace=True)
     data = data.set_index('junction_seq').join(data_junction).reset_index()
 
     # reduce to a junction-only dataset if requested
     if reduce:
         data.drop_duplicates('junction_seq', inplace=True)
         data['target_seq'] = data['junction_seq']
-        data['target_label'] = data['junction_label']
-        data['target_lfc'] = data['junction_lfc']
+        data['observed_label'] = data['junction_label']
+        data['observed_lfc'] = data['junction_lfc']
 
     return data
 

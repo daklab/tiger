@@ -5,7 +5,7 @@ import zlib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from data import load_data, label_and_filter_data, model_inputs, FEATURE_GROUPS, SCALAR_FEATS
+from data import load_data, label_and_filter_data, model_inputs, FEATURE_GROUPS, SCALAR_FEATS, LFC_COLS
 from models import build_model, train_model, test_model, explain_model
 from normalization import get_normalization_object
 
@@ -13,12 +13,14 @@ from normalization import get_normalization_object
 parser = utils.common_parser_arguments()
 parser.add_argument('--experiment', type=str, default=None, help='which experiment to run')
 parser.add_argument('--replace', action='store_true', default=False, help='forces rerun even if predictions exist')
-parser.add_argument('--seed', type=int, default=12345, help='random number seed for reproducibility')
-parser.add_argument('--seq_only', action='store_true', default=False, help='sequence only model')
 args = utils.parse_common_arguments(parser)
 
+# enable GPU determinism
+args.seed = 12345 if args.seed is None else args.seed
+tf.config.experimental.enable_op_determinism()
+
 # setup directories
-data_sub_dir = utils.data_directory(args.pm_only, args.indels)
+data_sub_dir = utils.data_directory(args.pm_only, args.indels, args.seq_only)
 experiment_path = os.path.join('experiments', args.dataset, args.experiment, data_sub_dir, args.holdout)
 os.makedirs(experiment_path, exist_ok=True)
 
@@ -31,6 +33,8 @@ if args.seq_only:
 
 # define experimental values to test
 if 'label-and-filter' in args.experiment:
+    assert args.dataset == 'junction'
+    assert args.normalization == 'No'
     experimental_values = list(itertools.product(['MinActiveRatio'], [0.01, 0.05], np.arange(0.0, 0.35, 0.05)))
 elif args.experiment == 'model':
     experimental_values = list(itertools.product(['Tiger1D', 'Tiger2D'], [set(), available_features]))
@@ -46,14 +50,9 @@ elif args.experiment == 'normalization':
         ('UnitInterval', dict(q_neg=5, q_pos=95, squash=True)),
         ('UnitInterval', dict(q_neg=10, q_pos=90, squash=True)),
         ('UnitVariance', dict()),
+        ('UnitMeanOfSquares', dict()),
         ('ZeroMeanUnitVariance', dict()),
-        # ('DepletionRatio', dict()),
-        ('Sigmoid', dict(min_point=0.01, cutoff_point=0.95)),
-        ('Sigmoid', dict(min_point=0.01, cutoff_point=0.90)),
-        ('Sigmoid', dict(min_point=0.05, cutoff_point=0.95)),
-        ('Sigmoid', dict(min_point=0.05, cutoff_point=0.90)),
-        ('Sigmoid', dict(min_point=0.10, cutoff_point=0.95)),
-        ('Sigmoid', dict(min_point=0.10, cutoff_point=0.90)),
+        ('DepletionRatio', dict()),
     ]
 elif args.experiment == 'context':
     experimental_values = [(-n, 0) if n < 0 else (0, n) for n in range(-25, 30, 5)]
@@ -125,15 +124,20 @@ for experimental_value in experimental_values:
     index = pd.MultiIndex.from_tuples([tuple(config_dict.values())], names=list(config_dict.keys()))
 
     # filter and normalize data
-    filtered_data = label_and_filter_data(data, data_nt, nt_quantile, filter_method, min_active_ratio)
-    normalizer = get_normalization_object(normalization)(filtered_data, **normalization_kwargs)
-    normalized_data = normalizer.normalize(filtered_data)
-    normalized_data = normalized_data.loc[~normalized_data.target_lfc.isna()]
+    if args.dataset == 'junction-splice-sites':
+        data['observed_lfc'] = data[LFC_COLS].mean(axis=1)
+        junction_data = label_and_filter_data(*load_data('junction'), nt_quantile, filter_method, min_active_ratio)
+        filtered_data = data.loc[data['gene'].isin(junction_data['gene'].unique())].copy()
+        normalizer = get_normalization_object(normalization)(junction_data, **normalization_kwargs)
+        normalizer.original_lfc = data[['gene', 'guide_seq', 'observed_lfc']].copy().set_index(['gene', 'guide_seq'])
+    else:
+        filtered_data = label_and_filter_data(data, data_nt, nt_quantile, filter_method, min_active_ratio)
+        normalizer = get_normalization_object(normalization)(filtered_data, **normalization_kwargs)
+    normalized_data = normalizer.normalize_targets(filtered_data)
+    normalized_data = normalized_data.loc[~normalized_data.observed_lfc.isna()]
 
     # add technical holdout
     if args.experiment == 'label-and-filter (off-target)':
-        assert args.dataset == 'junction'
-        assert args.normalization == 'No'
         normalized_data['fold'] = 'training'
         test_data = label_and_filter_data(*load_data('off-target', pm_only=True), nt_quantile=0.01, method='NoFilter')
         test_data = test_data.loc[~test_data['guide_seq'].isin(normalized_data['guide_seq'])]
@@ -146,7 +150,7 @@ for experimental_value in experimental_values:
         # drop any existing results
         length_prior = len(df_predictions)
         df_predictions = df_predictions.loc[df_predictions.index.values != index.values]
-        assert {length_prior - len(df_predictions)}.issubset({0, len(data)}), 'welp!'
+        assert {length_prior - len(df_predictions)}.issubset({0, len(normalized_data)}), 'welp!'
 
         # loop over folds
         df_tap = pd.DataFrame()
@@ -183,21 +187,29 @@ for experimental_value in experimental_values:
 
         # concatenate and save predictions
         df_tap.index = index.repeat(len(df_tap))
-        df_predictions = pd.concat([df_predictions, normalizer.denormalize(df_tap.copy(deep=True))])
+        if args.experiment != 'normalization':
+            df_tap = normalizer.denormalize_targets_and_predictions(df_tap)
+        df_predictions = pd.concat([df_predictions, df_tap])
         df_predictions.to_pickle(predictions_file)
 
-    # concatenate and save performance
-    for normalized, active_only in itertools.product([False, True], [False, True]):
-        df = df_predictions.loc[index].copy(deep=True)
-        if normalized:
-            df = normalizer.normalize(df)
-        df = df.loc[df.target_label == 1] if active_only else df
-        df = utils.measure_performance(df, index)
-        df['Normalized'] = normalized
-        df['Active Only'] = active_only
-        df_performance = pd.concat([df_performance, df])
-    df_performance.to_pickle(os.path.join(experiment_path, 'performance.pkl'))
+        # save Shapley values if needed
+        if args.experiment == 'SHAP':
+            df_shap.to_pickle(os.path.join(experiment_path, 'shap.pkl'))
 
-# save Shapley values if needed
-if args.experiment == 'SHAP':
-    df_shap.to_pickle(os.path.join(experiment_path, 'shap.pkl'))
+    # concatenate and save performance
+    if args.experiment == 'normalization':
+        for normalized_observations, normalized_predictions in itertools.product([False, True], [False, True]):
+            df = df_predictions.loc[index].copy()
+            if not normalized_observations:
+                df = normalizer.denormalize_observations(df)
+            if not normalized_predictions:
+                df = normalizer.denormalize_predictions(df)
+            for active_only in [False, True]:
+                perf = utils.measure_performance(df.loc[df.observed_label == 1] if active_only else df, index)
+                perf['Normalized Observations'] = normalized_observations
+                perf['Normalized Predictions'] = normalized_predictions
+                perf['Active Only'] = active_only
+                df_performance = pd.concat([df_performance, perf])
+    else:
+        df_performance = pd.concat([df_performance, utils.measure_performance(df_predictions.loc[index], index)])
+    df_performance.to_pickle(os.path.join(experiment_path, 'performance.pkl'))

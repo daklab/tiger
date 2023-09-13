@@ -20,9 +20,9 @@ data = label_and_filter_data(data, data_nt, args.nt_quantile, args.filter_method
 if 'junction' in args.dataset:
     if args.junction_mode == 'splice-sites':
         data['target_seq'] = data['5p_context'] + data['target_seq'] + data['3p_context']
-        data_junc = data[['target_seq', 'target_lfc', 'target_label']].groupby('target_seq').mean()
-        data_junc['target_label'] = data_junc['target_label'] >= 0.25
-        del data['target_lfc'], data['target_label']
+        data_junc = data[['target_seq', 'observed_lfc', 'observed_label']].groupby('target_seq').mean()
+        data_junc['observed_label'] = data_junc['observed_label'] >= 0.25
+        del data['observed_lfc'], data['observed_label']
         data = pd.merge(data_junc, data, on='target_seq')
         data = data.set_index('target_seq')
         data = data[~data.index.duplicated(keep='first')].reset_index()
@@ -37,7 +37,7 @@ else:
 
 # normalize data
 normalizer = get_normalization_object(args.normalization)(data=data)
-data = normalizer.normalize(data)
+data = normalizer.normalize_targets(data)
 
 # assemble model inputs
 data = model_inputs(data, target_context, scalar_feats=set(), include_replicates=True)
@@ -52,7 +52,7 @@ sequence = tf.strings.reduce_join(sequence, axis=-1)
 
 # save redacted version
 data = dict(x=data['target_tokens'],
-            y_mean=tf.expand_dims(data['target_lfc'], 1),
+            y_mean=tf.expand_dims(data['observed_lfc'], 1),
             y_replicates=data['replicate_lfc'],
             sequence=sequence)
 with open(args.dataset + '.pkl', 'wb') as f:

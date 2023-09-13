@@ -59,9 +59,10 @@ class OneHotSequenceModel(SequenceModelWithNonSequenceFeatures):
         x = self.concatenate_non_sequence_features(data, x, scalar_feats)
 
         # target values
-        y = data['target_lfc'] if 'target_lfc' in data.keys() else None
+        y = data['observed_lfc'] if 'observed_lfc' in data.keys() else None
+        w = data['sample_weights'] if 'sample_weights' in data.keys() else None
 
-        return x, y
+        return x, y, w
 
     def parse_input_scores(self, scores):
 
@@ -165,7 +166,7 @@ class TargetSequenceWithRBP(SequenceModelWithNonSequenceFeatures):
         x = self.concatenate_non_sequence_features(data, x, scalar_feats)
 
         # target values
-        y = data['target_lfc'] if 'target_lfc' in data.keys() else None
+        y = data['observed_lfc'] if 'observed_lfc' in data.keys() else None
 
         return x, y
 
@@ -210,7 +211,7 @@ class TranscriptEmbeddingModel(SequenceModelWithNonSequenceFeatures):
         x = self.concatenate_non_sequence_features(data, x, scalar_feats)
 
         # target values
-        y = data['target_lfc']
+        y = data['observed_lfc']
 
         return x, y
 
@@ -253,13 +254,14 @@ def build_model(name, target_len, context_5p, context_3p, use_guide_seq, loss_fn
     #     optimizer = tf.optimizers.Adam(5e-4)
     else:
         raise NotImplementedError
-    model.model.compile(optimizer=optimizer, loss=loss_fn, run_eagerly=debug)
+    model.model.compile(optimizer=optimizer, loss=loss_fn, weighted_metrics=[], run_eagerly=debug)
 
     return model
 
 
 def train_model(model, train_data, valid_data, batch_size=2048, verbose=0, **kwargs):
-    model.model.fit(*model.pack_inputs(train_data, **kwargs), validation_data=model.pack_inputs(valid_data, **kwargs),
+    x, y, w = model.pack_inputs(train_data, **kwargs)
+    model.model.fit(x, y, sample_weight=w, validation_data=model.pack_inputs(valid_data, **kwargs),
                     batch_size=batch_size, epochs=2000, verbose=verbose,
                     callbacks=[PerformanceCallback(same_line=not verbose, early_stop_patience=100)])
     return model
@@ -269,14 +271,14 @@ def test_model(model, valid_data):
 
     # keep relevant information
     df = pd.DataFrame()
-    for key in ['gene', 'target_seq', 'guide_id', 'guide_seq', 'guide_type', 'target_lfc', 'target_label']:
+    for key in ['gene', 'target_seq', 'guide_id', 'guide_seq', 'guide_type', 'observed_lfc', 'observed_label']:
         if key in valid_data.keys():
             df[key] = valid_data[key].numpy()
             if df[key].dtype == object:
                 df[key] = df[key].apply(lambda s: s.decode('utf-8'))
 
     # generate predictions
-    x, _ = model.pack_inputs(valid_data)
+    x, _, _ = model.pack_inputs(valid_data)
     df['predicted_lfc'] = model.model.predict(x, verbose=0)
 
     # if LFCs were predicted, join perfect match parents to each of their children (and themselves)
@@ -284,8 +286,8 @@ def test_model(model, valid_data):
         df.set_index('target_seq', inplace=True)
         df_pm = df[df.guide_type == 'PM'].copy()
         assert not df_pm.index.has_duplicates  # make sure the indices (target sequences) are unique
-        df_pm.rename(columns={'target_lfc': 'target_pm_lfc', 'predicted_lfc': 'predicted_pm_lfc'}, inplace=True)
-        df_pm = df_pm[['target_pm_lfc', 'predicted_pm_lfc']]
+        df_pm.rename(columns={'observed_lfc': 'observed_pm_lfc', 'predicted_lfc': 'predicted_pm_lfc'}, inplace=True)
+        df_pm = df_pm[['observed_pm_lfc', 'predicted_pm_lfc']]
         df = df.join(df_pm, how='left')
         df.reset_index(inplace=True)
 
@@ -295,8 +297,8 @@ def test_model(model, valid_data):
 def explain_model(model, train_data, valid_data, num_background_samples=5000):
 
     # assemble inputs
-    x_train, _ = model.pack_inputs(train_data)
-    x_valid, _ = model.pack_inputs(valid_data)
+    x_train, _, _ = model.pack_inputs(train_data)
+    x_valid, _, _ = model.pack_inputs(valid_data)
 
     # select a set of background examples to take an expectation over
     num_background_samples = min(num_background_samples, x_train.shape[0])

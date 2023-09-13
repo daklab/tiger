@@ -1,68 +1,62 @@
 import os
-import itertools
+import utils
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from analysis import plot_performance, sequence_pearson_and_shap, save_fig, METRICS
-from data import load_data, label_and_filter_data, sequence_complement
-from junction_utils import construct_junctions, append_rbp_predictions
+from analysis import sequence_pearson_and_shap, save_fig
+from data import load_data, label_and_filter_data, LFC_COLS
 from matplotlib import pyplot as plt
+from scipy.stats import pearsonr, spearmanr
+
+TIGER_EXON = 'TIGER (Wessels et al. 2023)'
+TIGER_JUNC = 'TIGER trained on our junction screen'
+TIGER_BASS = 'TIGER BASS (this paper)'
+CHENG = 'DeepCas13 (Cheng et al. 2023)'
+WEI = 'Wei et al. 2023'
 
 
-def plot_training_set_differences(fig_path: str, fig_ext: str):
+def plot_exon_vs_junc_shap_and_pearson(fig_path: str, fig_ext: str):
 
-    # load performance
-    base_dir = os.path.join('predictions', 'junction')
-    loop_vars = [('junction', False)]
-    loop_vars += list(itertools.product(['off-target', 'combined'], [False, True]))
-    performance = pd.DataFrame()
-    for dataset, corrected in loop_vars:
-        file_name = dataset + ('-corrected' if corrected else '') + '-performance.pkl'
-        if os.path.exists(os.path.join(base_dir, file_name)):
-            df = pd.read_pickle(os.path.join(base_dir, file_name))
-            df['Training set'] = dataset + (' (corrected)' if corrected else '')
-            performance = pd.concat([performance, df])
-
-    # if nothing was loaded, return
-    if len(performance) == 0:
-        return
-
-    # plot performance
-    order = list(performance.loc['junction'].groupby('Training set').mean().sort_values('AUPRC').index.values)
-    fig, ax = plt.subplots(figsize=(7.5, 5))
-    fig.suptitle('Training set performance impact')
-    sns.barplot(data=performance.reset_index(), x='Training set', y='AUPRC', ax=ax, order=order, hue='dataset')
-    for tick in ax.xaxis.get_majorticklabels():
-        tick.set_horizontalalignment('right')
-        tick.set_rotation(30)
-        sns.move_legend(ax, 'upper left', bbox_to_anchor=(1, 1))
-    plt.tight_layout()
-    save_fig(fig, fig_path, 'dataset_differences', fig_ext)
-
-
-def plot_two_stage_model_performances(fig_path: str, fig_ext: str):
-
-    # load performance
+    # load SHAP values
     try:
-        performance = os.path.join('experiments', 'junction', 'tiger-team', 'pm', 'guides', 'performance.pkl')
-        performance = pd.read_pickle(performance)
+        exon_shap = pd.read_pickle(os.path.join('experiments', 'off-target', 'SHAP', 'pm', 'targets', 'shap.pkl'))
+        junc_shap = pd.read_pickle(os.path.join('experiments', 'junction', 'SHAP', 'pm', 'targets', 'shap.pkl'))
     except FileNotFoundError:
-        return
+        return None
 
-    # plot summary results
-    fig, ax = plt.subplots(figsize=(10, 5))
-    df = performance[METRICS].melt(ignore_index=False, var_name='metric').reset_index()
-    df['value'] = df['value'].astype(float)
-    sns.barplot(x='metric', y='value', hue='task', data=df, order=METRICS, ax=ax)
-    for i, task in enumerate([legend_text.get_text() for legend_text in ax.get_legend().get_texts()]):
-        for j, metric in enumerate(METRICS):
-            x = ax.containers[i][j].get_x() + ax.containers[i][j].get_width() / 2
-            y = performance.loc[task, metric]
-            yerr = performance.loc[task, metric + ' err']
-            ax.errorbar(x=x, y=y, yerr=yerr, color='black')
-    ax.legend(bbox_to_anchor=(1, 1), loc='upper left')
-    plt.tight_layout()
-    save_fig(fig, fig_path, 'two_stage_model', fig_ext)
+    # load datasets
+    exon_data = load_data(dataset='off-target', pm_only=True)[0]
+    exon_data['observed_lfc'] = exon_data[LFC_COLS].mean(axis=1)
+    exon_data = exon_data.loc[exon_data['guide_seq'].isin(exon_shap['guide_seq'])]
+    junc_data = load_data(dataset='junction')[0]
+    junc_data['observed_lfc'] = junc_data[LFC_COLS].mean(axis=1)
+    junc_data = junc_data.loc[junc_data['guide_seq'].isin(junc_shap['guide_seq'])]
+
+    # get pearson and shap values
+    df_exon = sequence_pearson_and_shap(exon_data, exon_shap, mode='matches').reset_index()
+    df_exon['Type'] = 'exon'
+    df_junc = sequence_pearson_and_shap(junc_data, junc_shap, mode='matches').reset_index()
+    df_junc['Type'] = 'junction'
+    df = pd.concat([df_exon, df_junc])
+
+    # plot results
+    for value in ['Pearson', 'SHAP']:
+
+        # combined plot
+        fig, ax = plt.subplots()
+        sns.lineplot(df, x='Position', y='SHAP', hue='Guide-Target', style='Type', ax=ax)
+
+        # facet plot
+        g = sns.FacetGrid(df, col='Guide-Target', hue='Guide-Target')
+        g.map_dataframe(sns.lineplot, x='Position', y=value, style='Type')
+        g.axes.flat[-1].legend(*ax.get_legend_handles_labels(), loc='center right', bbox_to_anchor=(1.75, 0.5))
+        plt.tight_layout()
+
+        # close figure we don't want
+        plt.close(fig)
+
+        # save the figure we do want
+        save_fig(g.figure, fig_path, 'exon-junc-' + value.lower(), fig_ext)
 
 
 def plot_target_vs_junction_shap(fig_path: str, fig_ext: str, min_overlap: int = 3):
@@ -70,50 +64,52 @@ def plot_target_vs_junction_shap(fig_path: str, fig_ext: str, min_overlap: int =
 
     # load SHAP values
     try:
-        shap = os.path.join('experiments', 'junction', 'tiger-team', 'pm', 'guides', 'shap.pkl')
-        shap = pd.read_pickle(shap)
+        sub_dir = os.path.join('SHAP', 'pm', 'targets', 'shap.pkl')
+        target_shap = pd.read_pickle(os.path.join('experiments', 'junction', sub_dir))
+        junction_shap = pd.read_pickle(os.path.join('experiments', 'junction-splice-sites', sub_dir))
     except FileNotFoundError:
         return
 
-    # load data and create junction dataset
-    data = label_and_filter_data(*load_data('junction'))
-    data_junc = data.copy()
-    data_junc['target_seq'] = data['5p_context'] + data['target_seq'] + data['3p_context']
-    data_junc['guide_seq'] = data_junc['target_seq'].apply(sequence_complement)
+    # load datasets
+    target_data = load_data(dataset='junction')[0]
+    target_data['observed_lfc'] = target_data[LFC_COLS].mean(axis=1)
+    target_data = target_data.loc[target_data['guide_seq'].isin(target_shap['guide_seq'])]
+    junction_data = load_data(dataset='junction-splice-sites')[0]
+    junction_data['observed_lfc'] = junction_data[LFC_COLS].mean(axis=1)
+    junction_data = junction_data.loc[junction_data['guide_seq'].isin(junction_shap['guide_seq'])]
 
     # shapes
-    guide_len = data['guide_seq'].apply(len).unique()[0]
-    num_tiles = data['junction_olap_5p'].nunique()
-    tile_start = data_junc['target_seq'].apply(len).unique()[0] // 2 + int(data['junction_olap_5p'].min() * guide_len)
+    guide_len = target_data['guide_seq'].apply(len).unique()[0]
+    num_tiles = target_data['junction_olap_5p'].nunique()
+    tile_start = junction_data['target_seq'].apply(len).unique()[0] // 2
+    tile_start += int(target_data['junction_olap_5p'].min() * guide_len)
+
+    # average SHAP values
+    shap_targets = sequence_pearson_and_shap(target_data, target_shap, mode='matches').reset_index()
+    shap_junctions = sequence_pearson_and_shap(junction_data, junction_shap, mode='matches').reset_index()
 
     # prepare SHAP figure
     fig, ax = plt.subplots(figsize=(15, 5))
     index_cols = ['Position', 'Guide-Target']
 
-    # target SHAP values
-    shap_targets = sequence_pearson_and_shap(data, shap.loc['guide mean'], mode='matches').reset_index()[index_cols + ['SHAP']]
-    shap_targets['Position'] += tile_start + 1
-
     # tile target SHAP values
+    shap_targets['Position'] += tile_start
     shap_target_tiles = pd.DataFrame()
     for tile in range(0, num_tiles):
         shap_targets['Tile'] = tile
         shap_target_tiles = pd.concat([shap_target_tiles, shap_targets])
         shap_targets['Position'] += 1
-    shap_target_tiles['Model'] = 'Target (tiles)'
+    shap_target_tiles['SHAP Source'] = 'Guide model (tiles)'
 
     # average tiled target SHAP values
     num_counts = shap_target_tiles.groupby(index_cols)['SHAP'].count()
     shap_target_mean = shap_target_tiles.groupby(index_cols)['SHAP'].mean()
     shap_target_mean = shap_target_mean.loc[num_counts >= min_overlap, :].reset_index()
-    shap_target_mean['Model'] = 'Target (tile mean)'
+    shap_target_mean['SHAP Source'] = 'Guide model (tile mean)'
     shap_target_mean['Tile'] = -1  # dummy value that is unique to support plotting
 
     # junction SHAP values
-    shap.loc['junction mean', 'guide_seq'] = shap.loc['junction mean', 'target_seq'].apply(sequence_complement)
-    shap_junctions = sequence_pearson_and_shap(data_junc, shap.loc['junction mean'], mode='matches').reset_index()
-    shap_junctions = shap_junctions[index_cols + ['SHAP']]
-    shap_junctions['Model'] = 'Junction'
+    shap_junctions['SHAP Source'] = 'Junction model'
     shap_junctions['Tile'] = -2  # dummy value that is unique to support plotting
 
     # join data frames
@@ -121,184 +117,256 @@ def plot_target_vs_junction_shap(fig_path: str, fig_ext: str, min_overlap: int =
     df['Target Nucleotide'] = df['Guide-Target'].apply(lambda bp: bp[1])
 
     # plot the overlay
-    sns.lineplot(df, x='Position', y='SHAP', hue='Target Nucleotide', size='Model', style='Model', units='Tile',
+    sns.lineplot(df, x='Position', y='SHAP',
+                 hue='Target Nucleotide', size='SHAP Source', style='SHAP Source', units='Tile',
                  ax=ax, estimator=None,
-                 style_order=['Junction', 'Target (tile mean)', 'Target (tiles)'],
-                 sizes={'Target (tiles)': 1.0, 'Target (tile mean)': 1.5, 'Junction': 1.5})
+                 style_order=['Junction model', 'Guide model (tile mean)', 'Guide model (tiles)'],
+                 sizes={'Guide model (tiles)': 1.0, 'Guide model (tile mean)': 1.5, 'Junction model': 1.5})
 
     # manually adjust tiles' alpha value since seaborn doesn't support this
     for line in ax.get_lines()[:8] + ax.get_lines()[10:18] + ax.get_lines()[20:28] + ax.get_lines()[30:38]:
         line.set_alpha(0.3)
 
     # finalize and save figure
+    ax.set_xlim([1, 100])
+    ax.set_xticks([1.5, 25.5, 50.5, 75.5, 100.5], ['-50', '-25', '0', '+25', '+50'])
     ax.axvline(shap_target_tiles['Position'].min(), color='black', linestyle='--')
     ax.axvline(shap_target_tiles['Position'].max(), color='black', linestyle='--')
     plt.tight_layout()
     save_fig(fig, fig_path, 'shap-comparison', fig_ext)
 
 
-def plot_rbp_performance_difference(fig_path: str, fig_ext: str):
-
-    # experiment directory
-    exp_dir = os.path.join('experiments', 'junction', 'RBP')
-
-    # loop over models
-    for model in ['junction', 'target']:
-
-        # plot performance difference between sequence-only model and one that uses RBP binding predictions
-        try:
-            performance = pd.DataFrame()
-            predictions = pd.DataFrame()
-            for config in ['seq_only', 'rbp_junc', 'rbp_nt']:
-                index = pd.Index([config.replace('_', ' ')], name='Config.')
-                df = pd.read_pickle(os.path.join(exp_dir, model + '-' + config, 'performance.pkl'))
-                df.index = index
-                performance = pd.concat([performance, df])
-                df = pd.read_pickle(os.path.join(exp_dir, model + '-' + config, 'predictions.pkl'))
-                df.index = index.repeat(len(df))
-                predictions = pd.concat([predictions, df])
-            title = model.capitalize() + ' Model'
-            fig = plot_performance(performance, predictions, hue='Config.', null='seq only', title=title)
-            save_fig(fig, fig_path, 'rbp-performance-' + model, fig_ext)
-
-        except FileNotFoundError:
-            continue
+def load_gene_essentiality():
+    # compute gene essentiality
+    data = label_and_filter_data(*load_data('junction'), method='NoFilter')
+    gene_essentiality = data.groupby('gene')['observed_label'].mean().rename('essentiality')
+    return gene_essentiality
 
 
-def rbp_pearson_and_shap(model: str, rbp_level: str, reduce: bool):
+def load_predictions(dataset: str):
 
-    # try loading SHAP values
-    try:
-        subdir = model + '-rbp_' + rbp_level + ('_sum_peaks' if reduce else '')
-        shap = pd.read_pickle(os.path.join('experiments', 'junction', 'RBP', subdir, 'shap.pkl'))
-    except FileNotFoundError:
+    # load dataset
+    exon_path = os.path.join('predictions', 'junction', 'tiger', 'no_indels')
+    junc_path = os.path.join('predictions', 'junction', 'tiger-junc', 'pm')
+    bass_path = os.path.join('predictions', 'junction', 'tiger-bass', 'pm')
+    if dataset == 'junction':
+        csv_file = 'predictions_junc.csv'
+    elif dataset == 'junction-qpcr':
+        csv_file = 'predictions_qpcr.csv'
+    else:
+        raise NotImplementedError
+    pred_tiger_exon = os.path.join(exon_path, csv_file)
+    pred_tiger_junc = os.path.join(junc_path, csv_file)
+    pred_tiger_bass = os.path.join(bass_path, csv_file)
+    if os.path.exists(pred_tiger_exon) and os.path.exists(pred_tiger_junc) and os.path.exists(pred_tiger_bass):
+        pred_tiger_exon = pd.read_csv(pred_tiger_exon)
+        pred_tiger_junc = pd.read_csv(pred_tiger_junc)
+        pred_tiger_bass = pd.read_csv(pred_tiger_bass)
+    else:
+        return None
+
+    # force utilization of normalized predictions
+    for pred in [pred_tiger_junc, pred_tiger_bass]:
+        if 'predicted_lfc_normalized' in pred.columns:
+            del pred['predicted_lfc']
+            pred.rename(columns={'predicted_lfc_normalized': 'predicted_lfc'}, inplace=True)
+
+    # load other model predictions
+    pred_cheng = pd.read_csv(os.path.join('predictions (other models)', 'DeepCas13', dataset, 'predictions.csv'))
+    merge_columns = ['guide_seq'] + list(set(pred_tiger_exon.columns) - set(pred_cheng.columns))
+    pred_cheng = pd.merge(pred_cheng, pred_tiger_exon[merge_columns])
+    pred_wei = pd.read_csv(os.path.join('predictions (other models)', 'Konermann', dataset, 'predictions.csv'))
+    merge_columns = ['guide_seq'] + list(set(pred_tiger_exon.columns) - set(pred_wei.columns))
+    pred_wei = pd.merge(pred_wei, pred_tiger_exon[merge_columns])
+    pred_wei = pd.merge(pred_wei, pred_tiger_exon[['guide_seq', 'gene', 'observed_lfc']])
+
+    # model indices
+    index_tiger_exon = pd.Index(data=[TIGER_EXON], name='Model')
+    index_tiger_junc = pd.Index(data=[TIGER_JUNC], name='Model')
+    index_tiger_bass = pd.Index(data=[TIGER_BASS], name='Model')
+    index_cheng = pd.Index(data=[CHENG], name='Model')
+    index_wei = pd.Index(data=[WEI], name='Model')
+
+    # concatenate predictions
+    predictions = pd.concat([
+        pred_tiger_exon.set_index(index_tiger_exon.repeat(len(pred_tiger_exon))),
+        pred_tiger_junc.set_index(index_tiger_junc.repeat(len(pred_tiger_junc))),
+        pred_tiger_bass.set_index(index_tiger_bass.repeat(len(pred_tiger_bass))),
+        pred_cheng.set_index(index_cheng.repeat(len(pred_cheng))),
+        pred_wei.set_index(index_wei.repeat(len(pred_wei))),
+    ])
+
+    return predictions
+
+
+def add_sea_bass_slopes(predictions):
+    # ensure every prediction has both observed LFC and observed slope
+    tiger_junc_observations = predictions.loc[TIGER_JUNC, ['guide_seq', 'observed_lfc']]
+    tiger_junc_observations.rename(columns={'observed_lfc': 'Day 21 LFC'}, inplace=True)
+    tiger_bass_observations = predictions.loc[TIGER_BASS, ['guide_seq', 'observed_lfc']]
+    tiger_bass_observations = tiger_bass_observations.rename(columns={'observed_lfc': 'Sea-bass Slope'})
+    observations = pd.merge(tiger_junc_observations, tiger_bass_observations, on='guide_seq').set_index('guide_seq')
+    return pd.merge(predictions, observations, how='left', left_on='guide_seq', right_index=True)
+
+
+def sea_bass_benefit(fig_path: str, fig_ext: str, gene_threshold: float, p_sig: float):
+    # load predictions
+    predictions = load_predictions(dataset='junction')
+    if predictions is None:
+        return
+    predictions = predictions.loc[predictions.index.isin([TIGER_EXON, TIGER_JUNC, TIGER_BASS])]
+    predictions = predictions.loc[predictions['guide_seq'].isin(predictions.loc[TIGER_BASS, 'guide_seq'])]
+
+    # filter high-confidence essential genes
+    gene_essentiality = load_gene_essentiality()
+    essential_genes = gene_essentiality[gene_essentiality >= gene_threshold].reset_index()['gene']
+    essential_genes.to_csv(os.path.join(fig_path, 'essential_genes-{:.2f}.csv'.format(gene_threshold)), index=False)
+    predictions = predictions.loc[predictions['gene'].isin(essential_genes)]
+
+    # ensure SEA BASS slopes and Day 21 LFC are available to all models
+    predictions = add_sea_bass_slopes(predictions)
+    del predictions['observed_label']
+
+    # measure performances
+    performance = pd.DataFrame()
+    for model in predictions.index.unique():
+        for observation in ['Day 21 LFC', 'Sea-bass Slope']:
+            df = predictions.loc[model, ['predicted_lfc', 'predicted_score', observation]]
+            performance = pd.concat([performance, pd.DataFrame(index=pd.Index([model], name='Model'), data={
+                'Observation': [observation],
+                'Pearson': [pearsonr(df['predicted_lfc'], df[observation])[0]],
+                # 'Spearman (Score)': [-spearmanr(df['predicted_score'], df[observation])[0]],
+            })])
+
+    # run statistical tests
+    performance = pd.concat([utils.statistical_tests(
+        reference_model=TIGER_BASS,
+        performance=performance.loc[performance['Observation'] == observation].copy(),
+        predictions=predictions,
+    ) for observation in ['Day 21 LFC', 'Sea-bass Slope']])
+    performance.to_csv(os.path.join(fig_path, 'sea-bass-benefit-{:.2f}.csv'.format(gene_threshold)))
+
+    # plot results
+    fig, ax = plt.subplots()
+    sns.barplot(performance.reset_index(), x='Observation', y='Pearson', hue='Model')
+    for i, model in enumerate(performance.index.unique()):
+        for j, observation in enumerate(performance['Observation'].unique()):
+            x = ax.containers[i][j].get_x() + ax.containers[i][j].get_width() / 2
+            y = ax.containers[i].datavalues[j]
+            if model == TIGER_BASS:
+                ax.text(x, y + 0.01, '$H_0$', horizontalalignment='center')
+            elif performance.loc[performance['Observation'] == observation, 'Pearson log10(p)'].loc[model] < p_sig:
+                ax.text(x, y + 0.01, '*', horizontalalignment='center')
+    ax.set_ylabel('Pearson: Predicted LFC vs Observation')
+    sns.move_legend(ax, 'upper left', bbox_to_anchor=(1, 1))
+    plt.tight_layout()
+    save_fig(fig, fig_path, 'sea-bass-benefit-{:.2f}'.format(gene_threshold), fig_ext)
+
+
+def gene_filtering_effect_all_models(fig_path: str, fig_ext: str):
+
+    # load predictions and join sea-bass slope estimates
+    predictions = load_predictions(dataset='junction')
+    if predictions is None:
+        return
+    predictions = predictions.loc[predictions.index.isin([TIGER_EXON, TIGER_JUNC, TIGER_BASS])]
+
+    # keep only common set of guides
+    guides = set.intersection(*[set(predictions.loc[idx, 'guide_seq'].unique()) for idx in predictions.index.unique()])
+    predictions = predictions.loc[predictions['guide_seq'].isin(guides)].copy()
+
+    # loop over essentiality filtering values
+    performance = pd.DataFrame()
+    gene_essentiality = load_gene_essentiality()
+    for essentiality in np.arange(0.05, 0.50, 0.05):
+        genes = list(gene_essentiality.index[gene_essentiality >= essentiality])
+        pred_filtered = predictions.loc[predictions['gene'].isin(genes)]
+        for idx in predictions.index.unique():
+            df = pred_filtered.loc[idx]
+            _, _, auprc, _ = utils.classification_metrics(df['observed_label'], df['predicted_score'])
+            performance = pd.concat([performance, pd.DataFrame(index=pd.Index([idx], name='Model'), data={
+                'AUPRC': auprc,
+                'Essentiality': essentiality
+            })])
+    performance.reset_index(inplace=True)
+
+    # plot sea-bass effect
+    fig, ax = plt.subplots()
+    sns.lineplot(performance, x='Essentiality', y='AUPRC', hue='Model', ax=ax, alpha=0.5)
+    sns.move_legend(ax, 'upper left', bbox_to_anchor=(1, 1))
+    plt.tight_layout()
+    save_fig(fig, fig_path, 'gene-filtering-all-auprc', fig_ext)
+
+
+def gene_filtering_effect_tiger_bass(fig_path: str, fig_ext: str):
+    # load TIGER-BASS predictions with both observed LFC and slopes
+    predictions = load_predictions(dataset='junction')
+    if predictions is None:
+        return
+    predictions = add_sea_bass_slopes(predictions).loc[TIGER_BASS]
+
+    # compute gene essentiality
+    gene_essentiality = predictions.groupby('gene')['observed_label'].mean()
+
+    # loop over essentiality filtering values
+    performance = pd.DataFrame()
+    for essentiality in np.arange(0.05, 0.45, 0.05):
+        genes = list(gene_essentiality.index[gene_essentiality >= essentiality])
+        pred_filtered = predictions.loc[predictions['gene'].isin(genes)]
+        index = pd.Index([essentiality], name='Essentiality')
+        df = utils.measure_performance(pred_filtered, obs_var='Sea-bass Slope', index=index, silence=True)
+        df['Guide Retention Ratio'] = len(pred_filtered) / len(predictions)
+        df['Gene Retention Ratio'] = len(genes) / len(gene_essentiality)
+        performance = pd.concat([performance, df])
+    performance.reset_index(inplace=True)
+
+    # melt plot
+    df = performance.melt(
+        id_vars='Essentiality',
+        value_vars=['Guide Retention Ratio', 'Gene Retention Ratio', 'Pearson', 'Spearman', 'AUROC', 'AUPRC'],
+        var_name='Metric',
+        value_name='Value')
+
+    # plot performance
+    g = sns.FacetGrid(df, col='Metric', col_wrap=2, sharey=False)
+    g.map(sns.lineplot, 'Essentiality', 'Value', 'Metric')
+    save_fig(g.figure, fig_path, 'gene-filtering-tiger-bass-summary', fig_ext)
+
+    # pull out ROC/PRC vectors
+    df = performance.set_index('Essentiality')[['ROC', 'PRC']]
+    for col, key in [('ROC', 'fpr'), ('ROC', 'tpr'), ('PRC', 'precision'), ('PRC', 'recall')]:
+        df[key] = df[col].apply(lambda d: d[key])
+
+    # plot filtering effect on PRC
+    fig, ax = plt.subplots()
+    norm = plt.Normalize(df.index.min(), df.index.max())
+    cm = plt.cm.rainbow
+    sm = plt.cm.ScalarMappable(cmap=cm, norm=norm)
+    for ess in df.index.unique():
+        ax.plot(df.loc[ess, 'recall'], df.loc[ess, 'precision'], color=cm(norm(ess)))
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    plt.colorbar(sm)
+    save_fig(fig, fig_path, 'gene-filtering-tiger-bass-prc', fig_ext)
+
+
+def qpcr_comparison(fig_path: str, fig_ext: str):
+
+    # load predictions
+    predictions = load_predictions(dataset='junction-qpcr')
+    if predictions is None:
         return
 
-    # determine context
-    # TODO: this only supports symmetric context
-    context_5p = context_3p = (len(shap.iloc[0]['target:A']) - len(shap.iloc[0]['target_seq'])) // 2
-
-    # load data
-    data = label_and_filter_data(*load_data('junction'))
-    data = construct_junctions(data, reduce=(model == 'junction'))
-    data, rbp_list = append_rbp_predictions(data, rbp_level, context_5p, context_3p, reduce)
-    x, y = np.array(data[rbp_list].values.tolist()), data['target_lfc'].values
-
-    # compute correlations
-    y = np.reshape(y, [-1] + [1] * (x.ndim - y.ndim))
-    pearson = np.mean((y - y.mean(axis=0)) * (x - x.mean(axis=0)), axis=0) / y.std(axis=0) / x.std(axis=0)
-    pearson = pd.DataFrame([np.split(pearson, indices_or_sections=len(rbp_list))], columns=rbp_list)
-    if rbp_level == 'junc':
-        pearson = pearson.sort_values(by=0, axis=1)
-    pearson['value'] = 'Pearson'
-
-    # SHAP values
-    shap_mean = np.mean(shap[rbp_list].values.tolist(), axis=0)
-    shap_mean = pd.DataFrame([np.split(shap_mean, indices_or_sections=len(rbp_list))], columns=rbp_list)
-    shap_mean['value'] = 'SHAP Mean'
-    shap_std = np.std(shap[rbp_list].values.tolist(), axis=0)
-    shap_std = pd.DataFrame([np.split(shap_std, indices_or_sections=len(rbp_list))], columns=rbp_list)
-    shap_std['value'] = 'SHAP Std.'
-
-    # aggregate values
-    df = pd.concat([pearson, shap_mean, shap_std])
-
-    # for one-hot peaks, compute conditional average
-    data = data[['target_seq'] + rbp_list].set_index('target_seq')
-    shap = shap[['target_seq'] + rbp_list].set_index('target_seq')
-    data = data.loc[shap.index.values]
-    peak = np.array(data[rbp_list].values.tolist())
-    shap = np.array(shap[rbp_list].values.tolist())
-    if 'nt' in rbp_level and not reduce:
-        counts = np.sum(peak, axis=0)
-        shap_peak_mean = np.sum(peak * shap, axis=0) / counts
-        shap_peak_mean[counts == 0] = 0
-        shap_peak_mean = pd.DataFrame([np.split(shap_peak_mean, indices_or_sections=len(rbp_list))], columns=rbp_list)
-        shap_peak_mean['value'] = 'SHAP Mean | Peak'
-        df = pd.concat([df, shap_peak_mean])
-    elif 'nt' in rbp_level and reduce:
-        cov = np.mean((peak - np.mean(peak, axis=0)) * (shap - np.mean(shap, axis=0)), axis=0)
-        df = pd.concat([df, pd.DataFrame(dict(value=['Covariance'], num_peaks=[cov]))])
-        for num_peaks in np.unique(peak):
-            counts = np.sum(peak == num_peaks, axis=0)
-            shap_peak_mean = np.sum((peak == num_peaks) * shap, axis=0) / counts
-            df = pd.concat([df, pd.DataFrame(dict(value=['SHAP Mean | {:d} Peaks'.format(num_peaks)],
-                                                  num_peaks=[shap_peak_mean]))])
-
-    return df.set_index('value')
-
-
-def plot_junction_level_rbp_pearson_and_shap(fig_path: str, fig_ext: str, model: str):
-
-    # get plot values
-    df_plot = rbp_pearson_and_shap(model=model, rbp_level='junc', reduce=False)
-    df_plot = df_plot.astype(float)
-
-    # plot correlations and SHAP
-    fig, ax = plt.subplots(nrows=len(df_plot), figsize=(20, 5 * len(df_plot)))
-    fig.suptitle(model.capitalize())
-    for i, value in enumerate(df_plot.index):
-        ax[i].set_title(model.capitalize() + ' RBP ' + value)
-        sns.barplot(df_plot.loc[[value]], ax=ax[i])
-        ax[i].set_xticks(np.arange(len(df_plot.columns)))
-        ax[i].xaxis.set_ticklabels(df_plot.columns, size=2.5)
-        for tick in ax[i].xaxis.get_majorticklabels():
-            tick.set_horizontalalignment('right')
-            tick.set_rotation(30)
-    plt.tight_layout()
-    save_fig(fig, fig_path, 'rbp-junction-scores-' + model, fig_ext)
-
-
-def plot_nt_level_rbp_shap(fig_path: str, fig_ext: str, model: str, rbp_level: str):
-
-    # get plot values
-    df_plot = rbp_pearson_and_shap(model=model, rbp_level=rbp_level, reduce=False)
-
-    # SHAP mean vectors
-    shap_vectors = np.squeeze(df_plot.loc['SHAP Mean | Peak'].values.tolist())
-    i_sort = np.argsort(shap_vectors.sum(axis=1))
-
-    # plot data
-    fig, ax = plt.subplots(figsize=tuple(np.flip(shap_vectors.shape) / 10))
-    ax.set_title('RBP SHAP values')
-    max_abs = np.max(np.abs(shap_vectors))
-    sns.heatmap(shap_vectors[i_sort], ax=ax, cmap=sns.color_palette('vlag', as_cmap=True), vmin=-max_abs, vmax=+max_abs)
-    ax.set_xticks(np.arange(0, shap_vectors.shape[1] + 1, 5))
-    ax.xaxis.set_ticklabels(ax.get_xticks(), size=5)
-    ax.set_yticks(np.arange(len(df_plot.columns)))
-    ax.yaxis.set_ticklabels(df_plot.columns[i_sort], size=5)
-    plt.tight_layout()
-    save_fig(fig, fig_path, '-'.join(['rbp', model, rbp_level]), fig_ext)
-
-
-def plot_nt_level_rbp_peaks(fig_path: str, fig_ext: str, model: str, rbp_level: str):
-
-    # get plot values
-    df_plot = rbp_pearson_and_shap(model=model, rbp_level=rbp_level, reduce=True)
-
-    # prepare figure
-    shap_vectors = np.squeeze(df_plot.iloc[4:].values.tolist())
-    fig, ax = plt.subplots(nrows=2, figsize=tuple(np.flip(shap_vectors.shape) / 10))
-
-    # plot E[SHAP | Num. peaks, Position
-    ax[0].set_title('E[SHAP | Num. peaks, Position]')
-    max_abs = np.max(np.abs(shap_vectors))
-    sns.heatmap(shap_vectors, ax=ax[0], cmap=sns.color_palette('vlag', as_cmap=True), vmin=-max_abs, vmax=+max_abs)
-    ax[0].set_ylabel('Num. peaks')
-    ax[0].set_xlabel('Position')
-
-    # plot Cov[SHAP, Num. peaks | Position]
-    ax[1].set_title('Cov[SHAP, Num. peaks | Position]')
-    shap_vectors = np.array(df_plot.loc['Covariance'].values.tolist())[0]
-    max_abs = np.max(np.abs(shap_vectors))
-    sns.heatmap(shap_vectors, ax=ax[1], cmap=sns.color_palette('vlag', as_cmap=True), vmin=-max_abs, vmax=+max_abs)
-    ax[1].set_xlabel('Position')
-    ax[1].yaxis.set_ticklabels(['Covariance'], size=5)
-
-    # finalize figure
-    plt.tight_layout()
-    plt.show()
-    save_fig(fig, fig_path, '-'.join(['num_peaks', model, rbp_level]), fig_ext)
+    # qPCR scatter plot
+    rename_dict = {'predicted_score': 'Model Predictions', 'observed_lfc': 'qPCR: RNA KD Rel. to Control'}
+    x, y = tuple(rename_dict.values())
+    df = predictions.reset_index().rename(columns={**rename_dict, **dict(gene='Gene')})
+    g = sns.lmplot(df, x=x, y=y, col='Model', scatter=False)
+    for mdl, ax in g.axes_dict.items():
+        sns.scatterplot(df.loc[df.Model == mdl], x=x, y=y, hue='Gene', ax=ax)
+        r, p = pearsonr(df.loc[df.Model == mdl, x], df.loc[df.Model == mdl, y])
+        ax.text(0.35, 1.05, 'R = {:.2f}'.format(r) + (', p < 0.001' if p < 0.001 else ''))
+    save_fig(g.figure, fig_path, 'qpcr', fig_ext)
 
 
 if __name__ == '__main__':
@@ -309,24 +377,23 @@ if __name__ == '__main__':
 
     # custom junction figure directory
     figure_path = os.path.join('figures', 'junction', 'custom')
+    os.makedirs(figure_path, exist_ok=True)
     figure_ext = '.pdf'
 
-    # dataset differences plot
-    plot_training_set_differences(figure_path, figure_ext)
+    # exon vs junction sequence feature comparison
+    plot_exon_vs_junc_shap_and_pearson(figure_path, figure_ext)
 
     # target vs junction SHAP comparison
-    plot_target_vs_junction_shap(figure_path, figure_ext)
+    plot_target_vs_junction_shap(figure_path, figure_ext, min_overlap=4)
 
-    # RBP performance differences
-    plot_rbp_performance_difference(figure_path, figure_ext)
+    # plot sea-bass benefit
+    sea_bass_benefit(figure_path, figure_ext, gene_threshold=0.25, p_sig=0.0001)
 
-    # # junction-level RBP importance scores
-    # plot_junction_level_rbp_pearson_and_shap(figure_path, figure_ext, model='junction')
-    # plot_junction_level_rbp_pearson_and_shap(figure_path, figure_ext, model='target')
-    #
-    # # nucleotide-level RBP importance scores
-    # for mode in itertools.product(['junction', 'target'], ['nt', 'nt_relaxed']):
-    #     plot_nt_level_rbp_shap(figure_path, figure_ext, *mode)
-    #     plot_nt_level_rbp_peaks(figure_path, figure_ext, *mode)
+    # essential gene filter vs test performance
+    gene_filtering_effect_all_models(figure_path, figure_ext)
+    gene_filtering_effect_tiger_bass(figure_path, figure_ext)
+
+    # plot model comparison
+    qpcr_comparison(figure_path, figure_ext)
 
     plt.show()

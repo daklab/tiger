@@ -2,7 +2,7 @@ biopython==1.80
 matplotlib==3.6.2
 pandas==1.5.2
 seaborn==0.12.1
-shap==0.41.0
+shap==0.42.1
 sklearn
 statsmodels==0.13.5
 streamlit==1.21.0

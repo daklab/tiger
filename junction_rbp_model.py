@@ -16,7 +16,6 @@ parser.add_argument('--rbp_junc', action='store_true', default=False, help='use 
 parser.add_argument('--rbp_nt', action='store_true', default=False, help='use nt-level RBP predictions')
 parser.add_argument('--rbp_nt_relaxed', action='store_true', default=False, help='use relaxed nt-level RBP predictions')
 parser.add_argument('--sum_peaks', action='store_true', default=False, help='one-hot encoded peaks along RBP axis')
-parser.add_argument('--seed', type=int, default=None, help='random number seed for reproducibility')
 args = utils.parse_common_arguments(parser)
 context = (0, 0) if args.mode == 'junction' else (5, 5)
 assert args.rbp_junc + args.rbp_nt + args.rbp_nt_relaxed <= 1
@@ -44,7 +43,7 @@ data = label_and_filter_data(*load_data('junction'), args.nt_quantile, args.filt
 
 # normalize data
 normalizer = get_normalization_object(args.normalization)(data=data)
-data = normalizer.normalize(data)
+data = normalizer.normalize_targets(data)
 
 # construct junction data
 data = construct_junctions(data, reduce=(args.mode == 'junction'))
@@ -80,7 +79,8 @@ for fold in range(1, args.num_folds + 1):
                         rbp_list=target_feats,
                         debug=args.debug)  # TODO: output_fn
     model = train_model(model, train_data, valid_data, args.batch_size, scalar_feats=scalar_feats)
-    predictions = pd.concat([predictions, normalizer.denormalize(test_model(model, valid_data))])
+    df_tap = test_model(model, valid_data)
+    predictions = pd.concat([predictions, normalizer.denormalize_targets_and_predictions(df_tap)])
 
     # SHAP values
     shap = pd.concat([shap, explain_model(model, train_data, valid_data, num_background_samples=5000)])

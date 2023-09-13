@@ -9,6 +9,7 @@ from data import sequence_complement, INDEX_COLS, LFC_COLS, SEQUENCE_FEATS, SCAL
 # relevant columns
 GUIDE_COLS = ['end', 'start', 'junction_dist_5p', 'junction_dist_3p', 'guide_type', 'guide_seq']
 TRANSCRIPT_COLS = ['target_seq', 'length', 'cds_start', 'cds_stop']
+JUNCTION_COLS = ['junction_id', 'junction_seq', 'junction_category']
 COLUMNS_TO_SAVE = INDEX_COLS + ['guide_type'] + LFC_COLS + SEQUENCE_FEATS + SCALAR_FEATS
 
 
@@ -199,6 +200,51 @@ def process_hap_titration_data(num_folds, seed):
     data.to_pickle(os.path.join('data-processed', 'hap-titration.bz2'))
 
 
+def process_all_junctions():
+
+    # features for all junctions
+    data = pd.read_csv('data-raw/junction/230717_all_gencode_guides_hyb_table_unique.txt', delimiter='\t')
+    data = data.rename(columns={
+        'gene_name': 'gene',
+        'ID': 'guide_id',
+        'GuideSeq': 'guide_seq',
+        'TargetSeqContext': 'target_seq',
+        'hybMFE_15.9': 'hybrid_mfe_15_9',
+        'hybMFE_3.12': 'hybrid_mfe_3_12',
+        'log10_unpaired_p11': 'log_unpaired_11',
+        'log10_unpaired_p19': 'log_unpaired_19',
+        'log10_unpaired_p25': 'log_unpaired_25',
+    })
+    data['guide_type'] = 'PM'
+    data['guide_seq'] = data['guide_seq'].apply(lambda seq: seq[::-1])
+    data['5p_context'] = data['target_seq'].apply(lambda s: s[:2])
+    data['3p_context'] = data['target_seq'].apply(lambda s: s[-2:])
+    data['target_seq'] = data['target_seq'].apply(lambda s: s[2:-2])
+    assert set(data['guide_seq'].apply(len).unique()) == set(data['target_seq'].apply(len).unique())
+    data['log_gene_len'] = np.log10(data['txEnd'] - data['txStart'])
+    data['strand'] = data['strand'].apply(lambda s: +1 if s == '+' else -1)
+
+    # finalize data
+    data = data[[col for col in COLUMNS_TO_SAVE if col in data.columns]]
+    data.to_pickle(os.path.join('data-processed', 'junction-all.bz2'))
+
+
+def process_qpcr_junction_data():
+
+    # add qPCR data
+    pcr = pd.read_csv('data-raw/junction/230726_all_qPCR.txt', sep='\t').set_index(['guide_id'])
+    ids = pd.read_csv('data-raw/junction/230814_gencode_v41_universal_guideIDs.txt', sep='\t')
+    assert len(ids) == ids['guide_sequence'].nunique()
+    pcr = pd.merge(pcr, ids, how='left', on='guide_id')
+    pcr = pcr.rename(columns={'guide_sequence': 'guide_seq', 'avg_qpcr': 'observed_lfc'})[['guide_seq', 'observed_lfc']]
+    pcr['guide_seq'] = pcr['guide_seq'].apply(lambda seq: seq[::-1])
+
+    # join additional features
+    all_junctions = pd.read_pickle(os.path.join('data-processed', 'junction-all.bz2'))
+    pcr = pd.merge(pcr, all_junctions, how='left', on='guide_seq')
+    pcr.to_pickle(os.path.join('data-processed', 'junction-qpcr.bz2'))
+
+
 def process_raw_junction_data(num_folds, seed):
     """
     Process raw junction data and save the processed data as a Pandas DataFrame
@@ -219,68 +265,84 @@ def process_raw_junction_data(num_folds, seed):
     data_nt = data_nt.loc[data_nt.type == 'NT', LFC_COLS]
     data_nt.to_pickle(os.path.join('data-processed', 'junction-nt.bz2'))
 
-    # load data
+    # load table containing LFC measurements
     data = os.path.join(base_dir, '230411_final_screen_table_essential_genes.txt')
     data = pd.read_csv(data, delimiter='\t', low_memory=False)
     data = data[data.day == 'D21']
     assert set(data['type'].unique()) == {'essential'}
-    num_guides = data['guide_id'].nunique()
 
-    # adjust and rename existing features
+    # adjust and rename the features we want to keep from this table
     data['guide_seq'] = data['guide_sequence'].apply(lambda seq: seq[::-1])
-    data['guide_type'] = 'PM'
-    data['target_seq'] = data['target_sequence'].apply(lambda seq: seq[5:-5])
-    data['5p_context'] = data['target_sequence'].apply(lambda seq: seq[:5])
-    data['3p_context'] = data['target_sequence'].apply(lambda seq: seq[-5:])
-    data['log_gene_len'] = np.log10(data['length'])
-    data['strand'] = data['strand'].apply(lambda s: +1 if s == '+' else -1)
     data['junction_id'] = data['screen_junc_id']
     data['junction_olap_5p'] = (data['guide_start'] - data['junc_start']) / data['guide_sequence'].apply(len)
     data['junction_olap_3p'] = (data['guide_end'] - data['junc_end']) / data['guide_sequence'].apply(len)
     data['perc_gene_nuc'] = data['perc.gene.nuc'].apply(lambda x: x / 100)
     data['perc_junc_nuc'] = data['perc.junc.nuc'].apply(lambda x: x / 100)
-    data.rename(columns={
-        'gene_name': 'gene',
-        'DR': 'direct_repeat',
-        'Gquad': 'g_quad',
-        'MFE': 'mfe',
-        'hybMFE_3.12': 'hybrid_mfe_3_12',
-        'hybMFE_15.9': 'hybrid_mfe_15_9',
-        'Log10_Unpaired': 'log_unpaired',
-    }, inplace=True)
 
     # pivot and rejoin replicate LFC values
-    lfc = data[['guide_id', 'replicate', 'logFC']].set_index('guide_id')
+    lfc = data[['guide_seq', 'replicate', 'logFC']].set_index('guide_seq')
     lfc = lfc.pivot(columns='replicate', values='logFC').rename(columns={'R2': 'lfc_r2', 'R3': 'lfc_r3'})
     data['lfc_r1'] = np.nan
     assert not lfc.index.has_duplicates
-    data = data.set_index('guide_id')
+    data = data.set_index('guide_seq')
     data = data.loc[data.index.duplicated(keep='first')]
     data = data.join(lfc)
     assert not data.index.has_duplicates
-    data = data.reset_index()
+
+    # join additional features
+    all_junctions = pd.read_pickle(os.path.join('data-processed', 'junction-all.bz2'))
+    all_junctions.set_index('guide_seq', inplace=True)
+    assert not all_junctions.index.has_duplicates
+    data = data[[c for c in data.columns if c in set(COLUMNS_TO_SAVE + JUNCTION_COLS) - set(all_junctions.columns)]]
+    data = data.join(all_junctions).reset_index()
+
+    # drop any rows containing NaNs
+    data = data.loc[~data[list(set(data.columns) - {'lfc_r1'})].isna().any(axis=1)]
 
     # add junction sequence
     junction_sequence = pd.read_csv(os.path.join(base_dir, 'junc_seq.txt'), delimiter='\t', low_memory=False)
     junction_sequence.rename(columns={'junc.name': 'junction_id', 'junc.sequence': 'junction_seq'}, inplace=True)
     data = data.set_index('junction_id').join(junction_sequence.set_index('junction_id')['junction_seq']).reset_index()
+    bad_targets = []
     for index, row in data.iterrows():
         target_seq = row['5p_context'] + row['target_seq'] + row['3p_context']
-        assert target_seq in row['junction_seq']
+        if target_seq not in row['junction_seq']:
+            bad_targets += [row['junction_id'] + ': ' + target_seq]
+    print('Junctions where target + context sequence is not in junction sequence:')
+    print('\n'.join(bad_targets))
 
-    # rename remaining columns
-    keep_columns = [col for col in COLUMNS_TO_SAVE if col in data.columns]
-    keep_columns += ['junction_id', 'junction_seq', 'junction_category']
+    # report missing columns
+    keep_columns = [col for col in COLUMNS_TO_SAVE if col in data.columns] + JUNCTION_COLS
     missing_columns = list(set(COLUMNS_TO_SAVE) - set(keep_columns))
     missing_columns.sort()
     print('Junction data is missing:', missing_columns)
-    num_perc_junc_nuc_nan = sum(data['perc_junc_nuc'].isna())
-    data = data.loc[~data[list(set(keep_columns) - {'lfc_r1'})].isna().any(axis=1), keep_columns]
-    assert len(data) == num_guides - num_perc_junc_nuc_nan
 
     # add fold assignments and save data
     data = fold_assignments(data, num_folds, seed)
     data.to_pickle(os.path.join('data-processed', 'junction.bz2'))
+
+
+def process_splice_site_data(num_folds, seed):
+    # load junction guide data
+    data = pd.read_pickle(os.path.join('data-processed', 'junction.bz2'))
+
+    # reduce to splice sites
+    data_splice_site = pd.DataFrame(data[['junction_seq'] + LFC_COLS].groupby('junction_seq')[LFC_COLS].mean())
+    data_splice_site = data_splice_site.join(data[list(set(data.columns) - set(LFC_COLS))].set_index('junction_seq'))
+    data_splice_site = data_splice_site.reset_index().drop_duplicates('junction_seq')
+    data_splice_site['target_seq'] = data_splice_site['junction_seq']
+    data_splice_site['5p_context'] = ''
+    data_splice_site['3p_context'] = ''
+    data_splice_site['guide_seq'] = data_splice_site['junction_seq'].apply(sequence_complement)
+    data_splice_site['guide_id'] = data_splice_site['guide_seq']
+
+    # keep only relevant columns
+    keep_columns = [col for col in COLUMNS_TO_SAVE if col in data_splice_site.columns and col not in SCALAR_FEATS]
+    data_splice_site = data_splice_site[keep_columns]
+
+    # add fold assignments and save data
+    data_splice_site = fold_assignments(data_splice_site, num_folds, seed)
+    data_splice_site.to_pickle(os.path.join('data-processed', 'junction-splice-sites.bz2'))
 
 
 def process_raw_junction_rbp_data():
@@ -309,21 +371,6 @@ def process_raw_junction_rbp_data():
         peaks = np.cumsum(peaks, axis=-1)[..., :100]
         df_rbp_nt = pd.DataFrame(index=df_peak_s.index, columns=df_peak_s.columns, data=peaks.tolist())
         df_rbp_nt.to_pickle(os.path.join('data-processed', 'junction-rbp-' + suffix + '.bz2'))
-
-
-def process_all_junctions():
-
-    # sequence for all junctions
-    data = pd.read_csv('data-raw/junction/gencode_v41_all_junction_guides.txt', delimiter='\t')
-    data = data.rename(columns=dict( gene_name='gene', guide_sequence='guide_seq', target_sequence='target_seq'))
-    data['guide_type'] = 'PM'
-    data['5p_context'] = data['target_seq'].apply(lambda s: s[:5])
-    data['3p_context'] = data['target_seq'].apply(lambda s: s[-5:])
-    data['target_seq'] = data['target_seq'].apply(lambda s: s[5:-5])
-    assert set(data['guide_seq'].apply(len).unique()) == set(data['target_seq'].apply(len).unique())
-    data = data.set_index(INDEX_COLS)
-    data = data[[col for col in COLUMNS_TO_SAVE if col in data.columns]]
-    data.to_pickle(os.path.join('data-processed', 'junction-all.bz2'))
 
 
 def process_raw_hap_validation_data():
@@ -408,8 +455,10 @@ if __name__ == '__main__':
     if args.dataset == 'all' or args.dataset == 'hap-titration':
         process_hap_titration_data(args.num_folds, args.seed)
     if args.dataset == 'all' or args.dataset == 'junction':
-        process_raw_junction_data(args.num_folds, args.seed)
-        process_raw_junction_rbp_data()
         process_all_junctions()
+        process_qpcr_junction_data()
+        process_raw_junction_data(args.num_folds, args.seed)
+        process_splice_site_data(args.num_folds, args.seed)
+        # process_raw_junction_rbp_data()
     # if args.dataset == 'all' or args.dataset == 'hap-validation':
     #     process_raw_hap_validation_data()

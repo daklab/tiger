@@ -9,7 +9,6 @@ from normalization import get_normalization_object
 # script arguments
 parser = utils.common_parser_arguments()
 parser.add_argument('--mm_only', action='store_true', default=False, help='use only mismatched guides')
-parser.add_argument('--seed', type=int, default=None, help='random number seed for reproducibility')
 args = utils.parse_common_arguments(parser)
 assert not (args.mm_only and args.pm_only)
 
@@ -19,7 +18,7 @@ if args.seed is not None:
     tf.keras.utils.set_random_seed(args.seed)
 
 # setup output directory
-sub_dir = 'mm' if args.mm_only else utils.data_directory(args.pm_only, args.indels)
+sub_dir = 'mm' if args.mm_only else utils.data_directory(args.pm_only, args.indels, args.seq_only)
 pred_path = os.path.join('predictions', args.dataset, sub_dir, args.holdout)
 os.makedirs(pred_path, exist_ok=True)
 
@@ -28,8 +27,8 @@ data = load_data(args.dataset, pm_only=args.pm_only, indels=args.indels, holdout
 data = label_and_filter_data(*data, args.nt_quantile, args.filter_method, args.min_active_ratio)
 
 # normalize data
-normalizer = get_normalization_object(args.normalization)(data=data)
-data = normalizer.normalize(data)
+normalizer = get_normalization_object(args.normalization)(data, **args.normalization_kwargs)
+data = normalizer.normalize_targets(data)
 
 # remove PM guides if requested
 if args.mm_only:
@@ -47,8 +46,6 @@ for fold in set(data['fold'].unique()) - {'training'}:
     valid_data = model_inputs(data[data.fold == fold], args.context, scalar_feats=available_features)
 
     # train model
-    if args.seed is not None:
-        tf.keras.utils.set_random_seed(args.seed)
     model = build_model(name=args.model,
                         target_len=train_data['target_tokens'].shape[1],
                         context_5p=train_data['5p_tokens'].shape[1],
@@ -61,11 +58,13 @@ for fold in set(data['fold'].unique()) - {'training'}:
     model = train_model(model, train_data, valid_data, args.batch_size)
 
     # accumulate targets and predictions for held-out fold
-    df_tap = test_model(model, valid_data)
-    df_tap = pd.merge(df_tap, normalizer.denormalize(df_tap),
-                      on=['gene', 'target_seq', 'guide_seq', 'guide_type', 'target_label'],
-                      suffixes=('_normalized', ''))
-    predictions = pd.concat([predictions, df_tap])
+    predictions = pd.concat([predictions, test_model(model, valid_data)])
+
+    # free keras memory
+    tf.keras.backend.clear_session()
+
+# undo gene essentiality normalization
+predictions = normalizer.denormalize_targets_and_predictions(predictions)
 
 # save predictions and performance
 predictions.to_pickle(os.path.join(pred_path, 'predictions.pkl'))

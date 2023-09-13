@@ -21,3 +21,20 @@ def log_cosh(y_true, y_pred):
 class LogCosh(LossFunctionWrapper):
     def __init__(self, reduction=losses_utils.ReductionV2.AUTO, name='log_cosh'):
         super().__init__(log_cosh, name=name, reduction=reduction)
+
+
+@keras_export('keras.losses.bcesque', 'keras.losses.bcesque',
+              'keras.metrics.bcesque', 'keras.metrics.bcesque')
+@tf.__internal__.dispatch.add_dispatch_support
+def bcesque(y_true, y_pred):
+    y_pred = tf.convert_to_tensor(y_pred)
+    y_true = tf.cast(y_true, y_pred.dtype)
+    
+    y_label = tf.clip_by_value(y_true, -2., 0.) * 0.5 + 1.
+    
+    return -backend.mean(y_label * y_pred - tf.math.softplus(y_pred), axis=-1)
+
+
+class Bcesque(LossFunctionWrapper):
+    def __init__(self, reduction=losses_utils.ReductionV2.AUTO, name='bcesque'):
+        super().__init__(bcesque, name=name, reduction=reduction)

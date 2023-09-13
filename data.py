@@ -19,32 +19,41 @@ FEATURE_GROUPS = {
         'loc_cds',
         'loc_utr_3p',
         'log_gene_len',
-        'strand'],
+        # 'strand'
+    ],
     'junction overlap': [
         'junction_olap_5p',
-        'junction_olap_3p'],
+        'junction_olap_3p',
+    ],
     'junction proximity': [
         'junction_dist_5p',
-        'junction_dist_3p'],
+        'junction_dist_3p',
+    ],
     'guide secondary structure': [
         'direct_repeat',
-        'g_quad'],
+        'g_quad',
+    ],
     'guide MFE': [
-        'mfe'],
+        'mfe',
+    ],
     'hybridization MFE': [
         'hybrid_mfe_1_23',
         'hybrid_mfe_15_9',
-        'hybrid_mfe_3_12'],
+        'hybrid_mfe_3_12',
+    ],
     'target accessibility': [
         'log_unpaired',
         'log_unpaired_11',
         'log_unpaired_19',
-        'log_unpaired_25'],
-    'localization': [
-        'perc_gene_nuc',
-        'perc_junc_nuc'],
-    'usage': [
-        'perc_junc_use'],
+        'log_unpaired_25',
+    ],
+    # 'localization': [
+    #     'perc_gene_nuc',
+    #     'perc_junc_nuc',
+    # ],
+    # 'usage': [
+    #     'perc_junc_use',
+    # ],
 }
 SCALAR_FEATS = [feature for group_features in FEATURE_GROUPS.values() for feature in group_features]
 SCALAR_FEATS_INDELS = set(SCALAR_FEATS) - {'hybrid_mfe_1_23', 'hybrid_mfe_15_9', 'hybrid_mfe_3_12'}
@@ -82,11 +91,11 @@ def load_data(dataset, pm_only=False, indels=False, holdout='targets', scale_non
 
     # set the folds
     if holdout == 'genes':
-        data['fold'] = data['gene']
+        data['fold'] = data.get('gene')
     elif holdout == 'guides':
-        data['fold'] = data['guide_fold']
+        data['fold'] = data.get('guide_fold')
     elif holdout == 'targets':
-        data['fold'] = data['target_fold']
+        data['fold'] = data.get('target_fold')
     else:
         raise NotImplementedError
 
@@ -118,7 +127,7 @@ def label_and_filter_data(data, data_nt, nt_quantile=0.01, method='MinActiveRati
     :param method: essential gene filter method
     :param min_active_ratio: used by MinActiveRatio--genes with an active guide ratio less than this value get removed
     :param quiet: silences Lilliefors non-targeting distribution tests
-    :return: filtered data with target labels (active vs inactive)
+    :return: filtered data with observed labels (active vs inactive)
     """
     # non-targeting data is available
     if data_nt is not None and len(data_nt) > 0:
@@ -141,29 +150,40 @@ def label_and_filter_data(data, data_nt, nt_quantile=0.01, method='MinActiveRati
     if set(LFC_COLS).issubset(data.columns):
 
         # take mean of replicates as target value
-        data['target_lfc'] = data[LFC_COLS].mean(axis=1)
-        data = data[~data['target_lfc'].isna()]
-        assert sum(np.isnan(data['target_lfc'].values)) == 0
+        data['observed_lfc'] = data[LFC_COLS].mean(axis=1)
+        data = data[~data['observed_lfc'].isna()]
+        assert sum(np.isnan(data['observed_lfc'].values)) == 0
 
-        # label guides as active/inactive
-        data['target_label'] = data['target_lfc'] < threshold
+    # label guides as active/inactive
+    if 'observed_lfc' in data.columns:
+        data['observed_label'] = data['observed_lfc'] < threshold
+    elif 'q' in data.columns:
+        data['observed_label'] = (data['q'] < 0.1) & (data['z'] < 0.)  # significant at FDR 0.1 in the correct direction
 
-        # # label mismatch titration
-        # data_pm = data[data['guide_type'] == 'PM'][['gene', 'target_seq', 'target_lfc']]
-        # data_pm.rename(columns={'target_lfc': 'pm_lfc'}, inplace=True)
-        # data = pd.merge(data, data_pm, on=['gene', 'target_seq'])
-        # data['target_titration'] = 2 ** (data['pm_lfc'] - data['target_lfc'])
+    # keep only single-unique and common junctions
+    if 'junction_category' in data.columns:
+        data = data.loc[data['junction_category'].isin(['single_unique', 'common'])]
 
     # apply filter
     if method == 'NoFilter':
         return data
-    elif method == 'MinActiveRatio' and 'target_label' in data.columns:
-        if 'junction_category' in data.columns:
-            data = data.loc[data['junction_category'].isin(['single_unique', 'common'])]
-        df = pd.DataFrame(data[data.guide_type == 'PM'].groupby('gene')['target_label'].mean().rename('active ratio'))
+    elif method == 'MinActiveRatio' and 'observed_label' in data.columns:
+        df = pd.DataFrame(data[data.guide_type == 'PM'].groupby('gene')['observed_label'].mean().rename('active ratio'))
         return data[data['gene'].isin(df[df['active ratio'] >= min_active_ratio].index.values)]
     else:
         raise NotImplementedError
+
+
+def training_validation_split_targets(data: pd.DataFrame, train_ratio: float = 0.9):
+    assert 0 < train_ratio < 1
+
+    # target site folds
+    del data['fold']
+    targets = data[data.guide_type == 'PM'][['target_seq']].reset_index()
+    targets['fold'] = np.random.choice(['training', 'validation'], p=[train_ratio, 1 - train_ratio], size=len(targets))
+    data = pd.merge(data, targets, how='inner', on='target_seq')
+
+    return data
 
 
 def model_inputs(data, context, *, scalar_feats=(), target_feats=(), include_replicates=False, max_context=100):
@@ -237,10 +257,12 @@ def model_inputs(data, context, *, scalar_feats=(), target_feats=(), include_rep
     }
 
     # target values
-    if 'target_lfc' in data.columns:
-        inputs.update({'target_lfc': tf.constant(data['target_lfc'], tf.float32)})
-    if 'target_label' in data.columns:
-        inputs.update({'target_label': tf.constant(data['target_label'], tf.uint8)})
+    if 'observed_lfc' in data.columns:
+        inputs.update({'observed_lfc': tf.constant(data['observed_lfc'], tf.float32)})
+    if 'observed_label' in data.columns:
+        inputs.update({'observed_label': tf.constant(data['observed_label'], tf.uint8)})
+    if 'sample_weights' in data.columns:
+        inputs.update({'sample_weights': tf.constant(data['sample_weights'], tf.float32)})
     if include_replicates:
         inputs.update({'replicate_lfc': tf.constant(data[LFC_COLS], tf.float32)})
 
