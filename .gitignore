@@ -1,9 +1,9 @@
 .idea/
 .run/
 __pycache__
+/data-processed/junction*
 /data-raw/
 /essentiality/
 /experiments/
 /figures/
-/meta-data/
 /predictions/

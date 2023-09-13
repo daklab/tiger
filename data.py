@@ -18,7 +18,11 @@ FEATURE_GROUPS = {
         'loc_utr_5p',
         'loc_cds',
         'loc_utr_3p',
-        'log_gene_len'],
+        'log_gene_len',
+        'strand'],
+    'junction overlap': [
+        'junction_olap_5p',
+        'junction_olap_3p'],
     'junction proximity': [
         'junction_dist_5p',
         'junction_dist_3p'],
@@ -36,10 +40,13 @@ FEATURE_GROUPS = {
         'log_unpaired_11',
         'log_unpaired_19',
         'log_unpaired_25'],
+    'localization': [
+        'perc_gene_nuc',
+        'perc_junc_nuc'],
+    'usage': [
+        'perc_junc_use'],
 }
-SCALAR_FEATS = list()
-for features in FEATURE_GROUPS.values():
-    SCALAR_FEATS += features
+SCALAR_FEATS = [feature for group_features in FEATURE_GROUPS.values() for feature in group_features]
 SCALAR_FEATS_INDELS = set(SCALAR_FEATS) - {'hybrid_mfe_1_23', 'hybrid_mfe_15_9', 'hybrid_mfe_3_12'}
 UNIT_SCALED_FEATS = ['loc_utr_5p', 'loc_cds', 'loc_utr_3p',
                      'direct_repeat', 'g_quad',
@@ -151,18 +158,21 @@ def label_and_filter_data(data, data_nt, nt_quantile=0.01, method='MinActiveRati
     if method == 'NoFilter':
         return data
     elif method == 'MinActiveRatio' and 'target_label' in data.columns:
-        df = pd.DataFrame(data.groupby('gene')['target_label'].mean().rename('active ratio'))
+        if 'junction_category' in data.columns:
+            data = data.loc[data['junction_category'].isin(['single_unique', 'common'])]
+        df = pd.DataFrame(data[data.guide_type == 'PM'].groupby('gene')['target_label'].mean().rename('active ratio'))
         return data[data['gene'].isin(df[df['active ratio'] >= min_active_ratio].index.values)]
     else:
         raise NotImplementedError
 
 
-def model_inputs(data, target_context, scalar_features, include_replicates=False, max_context=100):
+def model_inputs(data, context, *, scalar_feats=(), target_feats=(), include_replicates=False, max_context=100):
     """
     Prepares a dictionary of model inputs and target values from the provided DataFrame
     :param data: panda's DataFrame containing model inputs and target values
-    :param target_context: amount of target context
-    :param scalar_features: scalar features to be provided to the model
+    :param context: amount of target context
+    :param scalar_feats: scalar features to be provided to the model
+    :param target_feats: additional sequence features
     :param include_replicates: whether to include raw replicates
     :param max_context: maximum amount of up- and down-stream context (reduce RAM usage for guides with 1kb available)
     :return: dictionary containing model inputs and target values
@@ -171,7 +181,7 @@ def model_inputs(data, target_context, scalar_features, include_replicates=False
     data = data.sample(frac=1)
 
     # keep only data without NaN values for the scalar features
-    data = data[(~data[list(scalar_features)].isna()).product(1) == 1]
+    data = data[(~data[list(scalar_feats)].isna()).product(1) == 1]
 
     # trim context to some reasonable amount
     data['5p_context'] = data['5p_context'].apply(lambda s: s[-min(len(s), max_context):]).astype(str)
@@ -198,22 +208,25 @@ def model_inputs(data, target_context, scalar_features, include_replicates=False
     guide_tokens = tf.cast(guide_tokens, tf.uint8)
 
     # these operations are only necessary if using additional target context sequence
-    if isinstance(target_context, (list, tuple)):
-        context_5p, context_3p = tuple(target_context)
+    if isinstance(context, (list, tuple)):
+        context_5p, context_3p = tuple(context)
     else:
-        context_5p = context_3p = target_context
+        context_5p = context_3p = context
 
     # add target context
-    tokens_5p = tf.constant(pad_sequences(tokens_5p.to_list(), dtype='uint8', padding='pre', value=255))
-    tokens_5p = tokens_5p[:, tokens_5p.shape[1]-context_5p:tokens_5p.shape[1]]
-    tokens_3p = tf.constant(pad_sequences(tokens_3p.to_list(), dtype='uint8', padding='post', value=255))
-    tokens_3p = tokens_3p[:, :context_3p]
+    max_len_5p = max(tokens_5p.bounding_shape()[1], context_5p)
+    tokens_5p = pad_sequences(tokens_5p.to_list(), maxlen=max_len_5p, dtype='uint8', padding='pre', value=255)
+    tokens_5p = tf.constant(tokens_5p[:, tokens_5p.shape[1]-context_5p:tokens_5p.shape[1]])
+    max_len_3p = max(tokens_3p.bounding_shape()[1], context_3p)
+    tokens_3p = pad_sequences(tokens_3p.to_list(), maxlen=max_len_3p, dtype='uint8', padding='post', value=255)
+    tokens_3p = tf.constant(tokens_3p[:, :context_3p])
 
     # assemble dictionary of core model inputs
     inputs = {
         # data identifiers for downstream analysis
         'gene': tf.constant(data['gene'], tf.string),
         'target_seq': tf.constant(data['target_seq'], tf.string),
+        'guide_id': tf.constant(data['guide_id'], tf.string),
         'guide_seq': tf.constant(data['guide_seq'], tf.string),
         'guide_type': tf.constant(data['guide_type'], tf.string),
         # sequence features
@@ -231,11 +244,21 @@ def model_inputs(data, target_context, scalar_features, include_replicates=False
     if include_replicates:
         inputs.update({'replicate_lfc': tf.constant(data[LFC_COLS], tf.float32)})
 
+    # add sequence features
+    features = tf.zeros(target_tokens.shape[:1] + [context_5p + target_tokens.shape[1] + context_3p] + [0])
+    for feature in target_feats:
+        if feature in data.columns:
+            feature = tf.constant(np.stack(data[feature]), tf.float32)
+            features = tf.concat([features, tf.expand_dims(feature, axis=-1)], axis=-1)
+        else:
+            raise Exception('Missing target feature: ' + feature)
+    inputs.update({'target_features': features})
+
     # add optional features
-    for feature in scalar_features:
+    for feature in scalar_feats:
         if feature in data.columns:
             inputs.update({feature: tf.constant(data[feature], tf.float32)})
         else:
-            raise Exception('Missing feature: ' + feature)
+            raise Exception('Missing scalar feature: ' + feature)
 
     return inputs

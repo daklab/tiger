@@ -275,25 +275,21 @@ def compute_titration_ratios(df_tap):
 
     # index for SM guides with active targets
     active_targets = df_tap.loc[(df_tap.guide_type == 'PM') & (df_tap.target_label == 1), 'target_seq']
-    idx = df_tap.target_seq.isin(active_targets) & df_tap.guide_type.isin({'SM'})
+    df_tap = df_tap.loc[df_tap.target_seq.isin(active_targets) & df_tap.guide_type.isin({'SM'})].copy()
 
     # scale ratios to [0, 1] for SM guides with active targets
-    scale = df_tap.loc[idx, 'Predicted ratio'].quantile(0.01)
+    scale = df_tap['Predicted ratio'].quantile(0.01)
     df_tap['Observed ratio'] = (df_tap['Observed ratio'] - scale) / (1 - scale)
     df_tap['Predicted ratio'] = (df_tap['Predicted ratio'] - scale) / (1 - scale)
 
     # bias correction fit with SM guides with active targets
-    p = np.polyfit(x=df_tap.loc[idx, 'Predicted ratio'], y=df_tap.loc[idx, 'Observed ratio'], deg=1)
+    p = np.polyfit(x=df_tap['Predicted ratio'], y=df_tap['Observed ratio'], deg=1)
     df_tap['Predicted ratio'] = df_tap['Predicted ratio'].apply(lambda x: np.polyval(p, x))
 
     return df_tap
 
 
 def titration_confusion_matrix(df_tap, title):
-
-    # keep only guides with active target parents
-    active_targets = df_tap.loc[(df_tap.guide_type == 'PM') & (df_tap.target_label == 1), 'target_seq']
-    df_tap = df_tap[df_tap.target_seq.isin(active_targets) & (df_tap.guide_type.isin({'SM'}))]
 
     # place observed and predicted ratios into bins
     bins = np.arange(0.2, 1.0, .2)

@@ -78,16 +78,6 @@ def plot_performance(performance: pd.DataFrame, predictions: pd.DataFrame, hue: 
         ax[i + 1].set_ylabel(y_label)
         ax[i + 1].legend(title=hue)
 
-    # add replicate legend to first plot
-    legend = ax[0].legend(title='Model', loc='lower right')
-    handles, labels = ax[0].get_legend_handles_labels()
-    handles.append(ax[-1].get_legend_handles_labels()[0][-1])
-    labels.append(ax[-1].get_legend_handles_labels()[1][-1])
-    legend._legend_box = None
-    legend._init_legend_box(handles, labels)
-    legend._set_loc(legend._loc)
-    legend.set_title(legend.get_title().get_text())
-
     # make things pretty
     plt.tight_layout()
 
@@ -151,66 +141,65 @@ def drop_unused_index_levels(df: pd.DataFrame):
 def plot_label_and_filter_results(dataset: str, data_sub_dir: str, holdout: str, fig_ext: str):
 
     # load results, targets, and predictions
-    exp_path = experiment_results_path(dataset, 'label-and-filter', data_sub_dir, holdout)
     try:
-        performance = pd.read_pickle(os.path.join(exp_path, 'performance.pkl'))
+        exp_path = experiment_results_path(dataset, 'label-and-filter', data_sub_dir, holdout)
+        performance_junction = pd.read_pickle(os.path.join(exp_path, 'performance.pkl'))
         predictions = pd.read_pickle(os.path.join(exp_path, 'predictions.pkl'))
+        exp_path = experiment_results_path(dataset, 'label-and-filter (off-target)', data_sub_dir, holdout)
+        performance_off_target = pd.read_pickle(os.path.join(exp_path, 'performance.pkl'))
     except FileNotFoundError:
         return None
 
-    # initialize figure
-    fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
-    kwargs = {'linewidth': 2.5, 'marker': 'o', 'markersize': 7.5}
+    # combine performance
+    performance_junction['cell'] = 'A375'
+    performance_off_target['cell'] = 'HEK293'
+    performance = pd.concat([performance_junction, performance_off_target])
 
     # pull out relevant columns and check for a single configuration otherwise
-    performance = performance.reset_index(['filter-method', 'non-targeting quantile', 'min active ratio'])
-    predictions = predictions.reset_index(['filter-method', 'non-targeting quantile', 'min active ratio'])
+    performance = performance.reset_index(['non-targeting quantile', 'min active ratio'])
+    predictions = predictions.reset_index(['non-targeting quantile', 'min active ratio'])
     assert performance.index.nunique() == predictions.index.nunique() == 1
 
-    # loop over the various NT quantiles that label guides as active or inactive
-    for method in performance['filter-method'].unique():
-        for nt_cutoff in performance['non-targeting quantile'].unique():
+    # initialize figure
+    fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(15, 10))
+    kwargs = dict(marker='o', markersize=7.5, alpha=0.6)
 
-            # partial index
-            perf_idx = (performance['filter-method'] == method) & (performance['non-targeting quantile'] == nt_cutoff)
-            pred_idx = (predictions['filter-method'] == method) & (predictions['non-targeting quantile'] == nt_cutoff)
+    # plot performance
+    for i, metric in enumerate(METRICS):
+        ax = axes[i // 2, 1 + i % 2]
+        legend = (i // 2, 1 + i % 2) == (0, 2)
+        sns.lineplot(performance, x='min active ratio', y=metric, hue='cell', style='non-targeting quantile',
+                     ax=ax, legend=legend, **kwargs)
+        ax.set_ylim([performance.loc[performance['cell'] == 'A375', metric].min() * 0.95,
+                     performance.loc[performance['cell'] == 'A375', metric].max() * 1.05])
+        if legend:
+            ax.legend(bbox_to_anchor=(1, 1), loc='upper left')
 
-            # plot performance effects
-            x = performance['min active ratio'].dropna().unique()
-            label = method + ': ' + str(nt_cutoff)
-            for i, metric in enumerate(METRICS):
-                y = performance.loc[perf_idx, metric].values.tolist()
-                y_err = performance.loc[perf_idx, metric + ' err'].values.tolist()
-                if method == 'GoldStandard':
-                    y = y * len(x)
-                    y_err = y_err * len(x)
-                ax[i // 2, i % 2].errorbar(x, y, 2 * y_err, label=label, elinewidth=1, **kwargs)
-                ax[i // 2, i % 2].set_title(metric)
+    # plot data utilization
+    x = performance.loc[performance['cell'] == 'A375', 'min active ratio'].dropna().unique()
+    for i, nt_cutoff in enumerate(performance['non-targeting quantile'].unique()):
+        num_genes = []
+        num_guides = []
+        for min_ratio in x:
+            idx = (predictions['non-targeting quantile'] == nt_cutoff) & (predictions['min active ratio'] == min_ratio)
+            num_genes += [predictions.loc[idx, 'gene'].nunique()]
+            num_guides += [len(predictions.loc[idx])]
+        line_styles = ['-', '--']
+        axes[0, 0].plot(x, num_genes, color='tab:blue', linestyle=line_styles[i], **kwargs)
+        axes[0, 0].set_ylabel('# of genes')
+        axes[1, 0].plot(x, num_guides, color='tab:blue', linestyle=line_styles[i], **kwargs)
+        axes[1, 0].set_ylabel('# of guides')
 
-            # plot data utilization effects
-            if method == 'GoldStandard':
-                num_genes = [predictions.loc[pred_idx, 'gene'].nunique()] * len(x)
-                num_guides = [len(predictions.loc[pred_idx])] * len(x)
-            elif method == 'MinActiveRatio':
-                num_genes = []
-                num_guides = []
-                for min_ratio in x:
-                    idx = pred_idx & (predictions['min active ratio'] == min_ratio)
-                    num_genes += [predictions.loc[idx, 'gene'].nunique()]
-                    num_guides += [len(predictions.loc[idx])]
-            else:
-                raise NotImplementedError
-            ax[0, 2].plot(x, num_genes, label=label, **kwargs)
-            ax[0, 2].set_title('# of genes')
-            ax[1, 2].plot(x, num_guides, label=label, **kwargs)
-            ax[1, 2].set_title('# of guides')
+    #             for j, metric in enumerate(METRICS):
+    #                 y = performance.loc[perf_idx, metric].values.tolist()
+    #                 y_err = performance.loc[perf_idx, metric + ' err'].values.tolist()
+    #                 x_dodge = x + 0.2 * x_diff * i / performance['non-targeting quantile'].nunique()
+    #                 ax[j // 2, j % 2].errorbar(x_dodge, y, 2 * np.array(y_err), label=label, elinewidth=1, **kwargs)
+    #                 ax[j // 2, j % 2].set_title(metric)
 
-    # finalize plot
-    for a in ax.flatten():
-        a.set_xlabel('Min. active ratio')
-    ax[0, -1].legend(title='NT quantile', bbox_to_anchor=(1, 1), loc='upper left')
-    ax[0, 2].set_ylim(bottom=0)
-    ax[1, 2].set_ylim(bottom=0)
+    # finalize
+    axes[0, 0].set_ylim(bottom=0)
+    axes[1, 0].set_ylim(bottom=0)
     plt.tight_layout()
 
     # save figure
@@ -480,7 +469,7 @@ def sequence_shap(df_shap: pd.DataFrame, guide_nts: str = '', target_nts: str = 
     return guide_shap + target_shap
 
 
-def pearson_and_shap(data: pd.DataFrame, df_shap: pd.DataFrame, mode: str):
+def sequence_pearson_and_shap(data: pd.DataFrame, df_shap: pd.DataFrame, mode: str):
     assert mode in {'matches', 'mismatches'}
 
     # loop over guide-target base pairs according to requested mode
@@ -527,7 +516,7 @@ def plot_sequence_match_effects(dataset: str, data_sub_dir: str, holdout: str, f
     df_shap = df_shap[df_shap['guide_type'] == 'PM']
 
     # get pearson and shap values
-    df = pearson_and_shap(data, df_shap, mode='matches')
+    df = sequence_pearson_and_shap(data, df_shap, mode='matches')
 
     # print agreement between Pearson and SHAP values
     print('Agreement between Pearson and SHAP for matches = {:.4f}'.format(pearsonr(df['Pearson'], df['SHAP'])[0]))
@@ -568,7 +557,7 @@ def plot_sequence_mismatch_effects(dataset: str, data_sub_dir: str, holdout: str
         return
 
     # get pearson and shap values
-    df = pearson_and_shap(data, df_shap, mode='mismatches')
+    df = sequence_pearson_and_shap(data, df_shap, mode='mismatches')
 
     # print agreement between Pearson and SHAP values
     df_test = df.dropna()
@@ -656,7 +645,7 @@ def plot_non_sequence_effects(dataset: str, data_sub_dir: str, holdout: str, fig
     index_cols = ['target_seq', 'guide_seq']
 
     # SHAP values
-    available_features = list(set(SCALAR_FEATS).intersection(set(df_shap.columns)))
+    available_features = [f for f in df_shap.columns if ('guide' not in f and 'target' not in f and f != 'gene')]
     df_shap = df_shap[index_cols + available_features]
     order = df_shap[available_features].var(axis=0).sort_values(ascending=False).index.values.tolist()
 

@@ -14,6 +14,7 @@ parser = utils.common_parser_arguments()
 parser.add_argument('--experiment', type=str, default=None, help='which experiment to run')
 parser.add_argument('--replace', action='store_true', default=False, help='forces rerun even if predictions exist')
 parser.add_argument('--seed', type=int, default=12345, help='random number seed for reproducibility')
+parser.add_argument('--seq_only', action='store_true', default=False, help='sequence only model')
 args = utils.parse_common_arguments(parser)
 
 # setup directories
@@ -25,26 +26,44 @@ os.makedirs(experiment_path, exist_ok=True)
 scale_non_seq_feats = args.experiment == 'SHAP'
 data, data_nt = load_data(args.dataset, args.pm_only, args.indels, args.holdout, scale_non_seq_feats)
 available_features = set(SCALAR_FEATS).intersection(set(data.columns))
+if args.seq_only:
+    available_features = set()
 
 # define experimental values to test
-if args.experiment == 'label-and-filter':
-    nt_quantiles = [0.01, 0.05, 0.10, 0.15]
-    experimental_values = list(itertools.product(['GoldStandard'], nt_quantiles, [None]))
-    experimental_values += list(itertools.product(['MinActiveRatio'], nt_quantiles, np.arange(0.0, 0.2, 0.01)))
+if 'label-and-filter' in args.experiment:
+    experimental_values = list(itertools.product(['MinActiveRatio'], [0.01, 0.05], np.arange(0.0, 0.35, 0.05)))
 elif args.experiment == 'model':
-    args.context = 0
     experimental_values = list(itertools.product(['Tiger1D', 'Tiger2D'], [set(), available_features]))
 elif args.experiment == 'normalization':
-    experimental_values = [('No', dict()), ('FrequentistQuantile', dict())]
+    experimental_values = [
+        ('No', dict()),
+        ('FrequentistQuantile', dict(q_loc=50, q_neg=10, q_pos=90)),
+        ('UnitInterval', dict(q_neg=0, q_pos=100, squash=False)),
+        ('UnitInterval', dict(q_neg=1, q_pos=99, squash=False)),
+        ('UnitInterval', dict(q_neg=5, q_pos=95, squash=False)),
+        ('UnitInterval', dict(q_neg=10, q_pos=90, squash=False)),
+        ('UnitInterval', dict(q_neg=1, q_pos=99, squash=True)),
+        ('UnitInterval', dict(q_neg=5, q_pos=95, squash=True)),
+        ('UnitInterval', dict(q_neg=10, q_pos=90, squash=True)),
+        ('UnitVariance', dict()),
+        ('ZeroMeanUnitVariance', dict()),
+        # ('DepletionRatio', dict()),
+        ('Sigmoid', dict(min_point=0.01, cutoff_point=0.95)),
+        ('Sigmoid', dict(min_point=0.01, cutoff_point=0.90)),
+        ('Sigmoid', dict(min_point=0.05, cutoff_point=0.95)),
+        ('Sigmoid', dict(min_point=0.05, cutoff_point=0.90)),
+        ('Sigmoid', dict(min_point=0.10, cutoff_point=0.95)),
+        ('Sigmoid', dict(min_point=0.10, cutoff_point=0.90)),
+    ]
 elif args.experiment == 'context':
-    experimental_values = list(itertools.product([(-n, 0) if n < 0 else (0, n) for n in range(-25, 30, 5)],
-                                                 [set(), available_features]))
-    experimental_values += list(itertools.product([(n, n) for n in range(5, 30, 5)],
-                                                  [set(), available_features]))
-    experimental_values += list(itertools.product([(-n, 0) if n < 0 else (0, n) for n in [-4, -3, -2, -1, 1, 2, 3, 4]],
-                                                  [set(), available_features]))
-    experimental_values += list(itertools.product([(n, n) for n in range(1, 5)],
-                                                  [set(), available_features]))
+    experimental_values = [(-n, 0) if n < 0 else (0, n) for n in range(-25, 30, 5)]
+    experimental_values += [(n, n) for n in range(5, 30, 5)]
+    experimental_values += [(-n, 0) if n < 0 else (0, n) for n in [-4, -3, -2, -1, 1, 2, 3, 4]]
+    experimental_values += [(n, n) for n in range(1, 5)]
+    max_5p = max(data['5p_context'].apply(len))
+    max_3p = max(data['3p_context'].apply(len))
+    experimental_values = [(c5p, c3p) for c5p, c3p in experimental_values if c5p <= max_5p and c3p <= max_3p]
+    experimental_values = list(itertools.product(experimental_values, [set(), available_features]))
 elif args.experiment == 'feature-groups-individual':
     features = [tuple([feat for feat in available_features if feat in feats]) for feats in FEATURE_GROUPS.values()]
     experimental_values = [(g, f) for (g, f) in zip(FEATURE_GROUPS.keys(), features) if len(f) > 0]
@@ -75,12 +94,12 @@ df_performance = pd.DataFrame()
 df_shap = pd.DataFrame()
 for experimental_value in experimental_values:
     print('**********', args.experiment, experimental_value, '**********')
-    filter_method = experimental_value[0] if args.experiment == 'label-and-filter' else args.filter_method
-    nt_quantile = experimental_value[1] if args.experiment == 'label-and-filter' else args.nt_quantile
-    min_active_ratio = experimental_value[2] if args.experiment == 'label-and-filter' else args.min_active_ratio
+    filter_method = experimental_value[0] if 'label-and-filter' in args.experiment else args.filter_method
+    nt_quantile = experimental_value[1] if 'label-and-filter' in args.experiment else args.nt_quantile
+    min_active_ratio = experimental_value[2] if 'label-and-filter' in args.experiment else args.min_active_ratio
     model_name = experimental_value[0] if args.experiment == 'model' else args.model
     normalization = experimental_value[0] if args.experiment == 'normalization' else args.normalization
-    normalization_kwargs = experimental_value[1] if args.experiment == 'normalization' else dict()
+    normalization_kwargs = experimental_value[1] if args.experiment == 'normalization' else args.normalization_kwargs
     context = experimental_value[0] if args.experiment == 'context' else args.context
     if args.experiment in {'context', 'model', 'feature-groups-individual', 'feature-groups-cumulative'}:
         features = [feature for feature in available_features if feature in experimental_value[1]]
@@ -107,19 +126,31 @@ for experimental_value in experimental_values:
 
     # filter and normalize data
     filtered_data = label_and_filter_data(data, data_nt, nt_quantile, filter_method, min_active_ratio)
-    normalizer = get_normalization_object(normalization)(filtered_data, data_nt=data_nt, **normalization_kwargs)
+    normalizer = get_normalization_object(normalization)(filtered_data, **normalization_kwargs)
     normalized_data = normalizer.normalize(filtered_data)
+    normalized_data = normalized_data.loc[~normalized_data.target_lfc.isna()]
 
-    # if we have predictions for this configuration and can reuse them, load them
-    if not args.replace and len(experimental_values) > 1 and index.isin(df_predictions.index.unique())[0]:
-        df_tap = df_predictions.loc[index].reset_index()
+    # add technical holdout
+    if args.experiment == 'label-and-filter (off-target)':
+        assert args.dataset == 'junction'
+        assert args.normalization == 'No'
+        normalized_data['fold'] = 'training'
+        test_data = label_and_filter_data(*load_data('off-target', pm_only=True), nt_quantile=0.01, method='NoFilter')
+        test_data = test_data.loc[~test_data['guide_seq'].isin(normalized_data['guide_seq'])]
+        test_data['fold'] = 'test'
+        normalized_data = pd.concat([normalized_data, test_data])
 
-    # otherwise, begin pre-validation process
-    else:
+    # do we need results for this configuration?
+    if args.replace or not index.isin(df_predictions.index.unique())[0]:
+
+        # drop any existing results
+        length_prior = len(df_predictions)
+        df_predictions = df_predictions.loc[df_predictions.index.values != index.values]
+        assert {length_prior - len(df_predictions)}.issubset({0, len(data)}), 'welp!'
 
         # loop over folds
         df_tap = pd.DataFrame()
-        for k, fold in enumerate(set(data['fold'].unique()) - {'training'}):
+        for k, fold in enumerate(set(normalized_data['fold'].unique()) - {'training'}):
 
             # a deterministic but seemingly random transformation of the experiment seed into a fold seed
             fold_seed = int(zlib.crc32(str(k * args.seed).encode())) % (2 ** 32 - 1)
@@ -127,8 +158,8 @@ for experimental_value in experimental_values:
             # prepare training and validation data
             tf.keras.utils.set_random_seed(fold_seed)
             train_data = normalized_data[normalized_data.fold != fold].sample(frac=training_utilization)
-            train_data = model_inputs(train_data, context, features)
-            valid_data = model_inputs(normalized_data[normalized_data.fold == fold], context, features)
+            train_data = model_inputs(train_data, context, scalar_feats=features)
+            valid_data = model_inputs(normalized_data[normalized_data.fold == fold], context, scalar_feats=features)
 
             # train model
             tf.keras.utils.set_random_seed(fold_seed)
@@ -138,14 +169,12 @@ for experimental_value in experimental_values:
                                 context_3p=train_data['3p_tokens'].shape[1],
                                 use_guide_seq=args.use_guide_seq,
                                 loss_fn=args.loss,
-                                debug=args.debug)
+                                debug=args.debug,
+                                output_fn=normalizer.output_fn)
             model = train_model(model, train_data, valid_data, args.batch_size)
 
             # accumulate targets and predictions on held-out fold
-            if args.experiment != 'normalization':
-                df_tap = pd.concat([df_tap, normalizer.denormalize(test_model(model, valid_data))])
-            else:
-                df_tap = pd.concat([df_tap, test_model(model, valid_data)])
+            df_tap = pd.concat([df_tap, test_model(model, valid_data)])
 
             # compute Shapley values if needed
             if args.experiment == 'SHAP':
@@ -154,20 +183,20 @@ for experimental_value in experimental_values:
 
         # concatenate and save predictions
         df_tap.index = index.repeat(len(df_tap))
-        df_predictions = pd.concat([df_predictions, df_tap])
+        df_predictions = pd.concat([df_predictions, normalizer.denormalize(df_tap.copy(deep=True))])
         df_predictions.to_pickle(predictions_file)
 
-    # concatenate and save results
-    if args.experiment != 'normalization':
-        df_performance = pd.concat([df_performance, utils.measure_performance(df_tap, index)])
-        df_performance.to_pickle(os.path.join(experiment_path, 'performance.pkl'))
-    else:
-        df_performance_normalized = utils.measure_performance(df_tap, index)
-        df_performance_normalized['Denormalized'] = False
-        df_performance_denormalized = utils.measure_performance(normalizer.denormalize(df_tap), index)
-        df_performance_denormalized['Denormalized'] = True
-        df_performance = pd.concat([df_performance, df_performance_normalized, df_performance_denormalized])
-
+    # concatenate and save performance
+    for normalized, active_only in itertools.product([False, True], [False, True]):
+        df = df_predictions.loc[index].copy(deep=True)
+        if normalized:
+            df = normalizer.normalize(df)
+        df = df.loc[df.target_label == 1] if active_only else df
+        df = utils.measure_performance(df, index)
+        df['Normalized'] = normalized
+        df['Active Only'] = active_only
+        df_performance = pd.concat([df_performance, df])
+    df_performance.to_pickle(os.path.join(experiment_path, 'performance.pkl'))
 
 # save Shapley values if needed
 if args.experiment == 'SHAP':

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # configuration experiments
-python3 experiments.py --dataset off-target --experiment model --filter_method NoFilter --holdout targets
+python3 experiments.py --dataset off-target --context 0 --experiment model --filter_method NoFilter --holdout targets
 python3 experiments.py --dataset off-target --experiment context --filter_method NoFilter --holdout targets --model Tiger2D
 
 # learning curve experiments
@@ -45,3 +45,6 @@ python3 analysis.py --dataset off-target --holdout genes
 python3 analysis.py --dataset off-target --holdout guides
 python3 analysis.py --dataset off-target --holdout targets
 python3 tiger_figures.py
+
+ # web tool normalization experiments
+python3 experiments.py --dataset off-target --experiment normalization --seq_only --seed 12345

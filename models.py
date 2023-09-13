@@ -5,6 +5,7 @@ import pandas as pd
 import tensorflow as tf
 from data import NUCLEOTIDE_TOKENS, SCALAR_FEATS
 from callbacks import PerformanceCallback
+from typing import Union
 
 
 # configure GPUs
@@ -14,22 +15,31 @@ if len(tf.config.list_physical_devices('GPU')) > 0:
     tf.config.experimental.set_visible_devices(tf.config.list_physical_devices('GPU')[0], 'GPU')
 
 
-def concatenate_non_sequence_features(data, x):
-    non_sequence_features = []
-    for feature in SCALAR_FEATS:
-        if feature in data.keys():
-            non_sequence_features.append(feature)
-            x = tf.concat([x, tf.cast(data[feature][:, None], tf.float32)], axis=1)
-
-    return x, non_sequence_features
-
-
-class OneHotSequenceModel(object):
-    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool, pad_guide_seq: bool):
-        self.input_parser = layers.OneHotInputParser(target_len, context_5p, context_3p, use_guide_seq, pad_guide_seq)
+class SequenceModelWithNonSequenceFeatures(object):
+    def __init__(self):
         self.non_sequence_features = None
 
-    def pack_inputs(self, data: dict):
+    def concatenate_non_sequence_features(self, data, x, scalar_feats):
+        non_sequence_features = []
+        for feature in (scalar_feats if self.non_sequence_features is None else self.non_sequence_features):
+            if feature in data.keys():
+                non_sequence_features.append(feature)
+                x = tf.concat([x, tf.cast(data[feature][:, None], tf.float32)], axis=1)
+
+        if self.non_sequence_features is None:
+            self.non_sequence_features = non_sequence_features
+        else:
+            assert set(self.non_sequence_features) == set(non_sequence_features)
+
+        return x
+
+
+class OneHotSequenceModel(SequenceModelWithNonSequenceFeatures):
+    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool, pad_guide_seq: bool):
+        super().__init__()
+        self.input_parser = layers.OneHotInputParser(target_len, context_5p, context_3p, use_guide_seq, pad_guide_seq)
+
+    def pack_inputs(self, data: dict, scalar_feats: Union[list, tuple] = tuple(SCALAR_FEATS)):
 
         # one-hot encode, flatten, and concatenate target (and context) sequence tokens
         x = tf.concat([data['5p_tokens'], data['target_tokens'], data['3p_tokens']], axis=1)
@@ -46,7 +56,7 @@ class OneHotSequenceModel(object):
             x = tf.concat([x, tf.reshape(tf.one_hot(guide_tokens, depth=4), [len(data['guide_tokens']), -1])], axis=1)
 
         # concatenate and log available non-sequence features
-        x, self.non_sequence_features = concatenate_non_sequence_features(data, x)
+        x = self.concatenate_non_sequence_features(data, x, scalar_feats)
 
         # target values
         y = data['target_lfc'] if 'target_lfc' in data.keys() else None
@@ -71,7 +81,7 @@ class OneHotSequenceModel(object):
 
 
 class Tiger1D(OneHotSequenceModel):
-    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool):
+    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool, **kwargs):
         OneHotSequenceModel.__init__(self, target_len, context_5p, context_3p, use_guide_seq, pad_guide_seq=True)
 
         self.model = tf.keras.Sequential(name='Tiger1D', layers=[
@@ -89,12 +99,12 @@ class Tiger1D(OneHotSequenceModel):
             tf.keras.layers.Dropout(0.1),
             tf.keras.layers.Dense(units=32, activation='sigmoid'),
             tf.keras.layers.Dropout(0.1),
-            tf.keras.layers.Dense(1, activation='linear')
+            tf.keras.layers.Dense(1, activation=kwargs.get('output_fn') or 'linear')
         ])
 
 
 class Tiger2D(OneHotSequenceModel):
-    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool):
+    def __init__(self, target_len: int, context_5p: int, context_3p: int, use_guide_seq: bool, **kwargs):
         OneHotSequenceModel.__init__(self, target_len, context_5p, context_3p, use_guide_seq, pad_guide_seq=True)
 
         self.model = tf.keras.Sequential(name='Tiger2D', layers=[
@@ -112,17 +122,135 @@ class Tiger2D(OneHotSequenceModel):
             tf.keras.layers.Dropout(0.1),
             tf.keras.layers.Dense(units=32, activation='sigmoid'),
             tf.keras.layers.Dropout(0.1),
+            tf.keras.layers.Dense(1, activation=kwargs.get('output_fn') or 'linear')
+        ])
+
+
+class TargetSequenceWithRBP(SequenceModelWithNonSequenceFeatures):
+    def __init__(self, guide_len: int, context_5p: int, context_3p: int, *, rbp_list: list, **kwargs):
+        super().__init__()
+        self.input_parser = layers.TargetSequenceAndPositionalFeatures(guide_len, context_5p, context_3p, len(rbp_list))
+        self.rbp_list = rbp_list
+
+        # model declaration
+        self.model = tf.keras.Sequential(name='TargetSequenceWithRBP', layers=[
+            layers.SequenceSequentialWithNonSequenceBypass(
+                input_parser=self.input_parser,
+                sequence_layers=[
+                    layers.ReduceAndConcatTargetRBP(self.input_parser.feature_channels),
+                    tf.keras.layers.Conv1D(filters=64, kernel_size=4, activation='relu', padding='same'),
+                    tf.keras.layers.Conv1D(filters=64, kernel_size=4, activation='relu', padding='same'),
+                    tf.keras.layers.MaxPool1D(pool_size=2, padding='same'),
+                    tf.keras.layers.Flatten(),
+                    tf.keras.layers.Dropout(0.25),
+                ]),
+            tf.keras.layers.Dense(units=128, activation='sigmoid'),
+            tf.keras.layers.Dropout(0.1),
+            tf.keras.layers.Dense(units=32, activation='sigmoid'),
+            tf.keras.layers.Dropout(0.1),
+            tf.keras.layers.Dense(1, activation='linear')
+        ])
+
+    def pack_inputs(self, data: dict, scalar_feats: Union[list, tuple] = tuple(SCALAR_FEATS)):
+
+        # one-hot encode, flatten, and concatenate target (and context) sequence tokens
+        x = tf.concat([data['5p_tokens'], data['target_tokens'], data['3p_tokens']], axis=1)
+        x = tf.reshape(tf.one_hot(x, depth=4), [len(data['target_tokens']), -1])
+
+        # if we are using additional non-sequence but positional target features
+        if self.input_parser.feature_channels > 0:
+            x = tf.concat([x, tf.reshape(data['target_features'], [len(data['target_tokens']), -1])], axis=1)
+
+        # concatenate and log available non-sequence features
+        x = self.concatenate_non_sequence_features(data, x, scalar_feats)
+
+        # target values
+        y = data['target_lfc'] if 'target_lfc' in data.keys() else None
+
+        return x, y
+
+    def parse_input_scores(self, scores):
+
+        # unpack scores
+        target_scores, target_feature_scores, non_sequence_scores = self.input_parser.call(scores)
+
+        # load scores into DataFrame
+        score_dict = dict()
+        for nt, token in NUCLEOTIDE_TOKENS.items():
+            score_dict.update({'target:' + nt: target_scores[..., token].numpy().tolist()})
+        for i, rbp in enumerate(self.rbp_list):
+            score_dict.update({rbp: target_feature_scores[..., i].numpy().tolist()})
+        for i, feature in enumerate(self.non_sequence_features):
+            score_dict.update({feature: non_sequence_scores[:, i]})
+        df = pd.DataFrame(score_dict)
+
+        return df
+
+
+class TranscriptEmbeddingModel(SequenceModelWithNonSequenceFeatures):
+    def __init__(self, target_len: int, guide_len: int, use_guide_seq: bool):
+        super().__init__()
+        self.input_parser = layers.TokenInputParser(target_len, guide_len, use_guide_seq)
+
+    def pack_inputs(self, data: dict, scalar_feats: Union[list, tuple] = tuple(SCALAR_FEATS)):
+
+        # concatenate target sequence and position tokens
+        target_position = tf.range(start=0, limit=tf.shape(data['target_tokens'])[1], delta=1)
+        target_position = tf.tile(target_position[None, :], [tf.shape(data['target_tokens'])[0], 1])
+        x = tf.concat([tf.cast(data['target_tokens'], tf.float32), tf.cast(target_position, tf.float32)], axis=1)
+
+        # concatenate guide sequence and position tokens
+        if self.input_parser.use_guide_seq:
+            x = tf.concat([x, tf.cast(data['guide_tokens'], tf.float32)], axis=1)
+        guide_position = tf.range(start=0, limit=tf.shape(data['guide_tokens'])[1], delta=1)
+        guide_position = tf.tile(guide_position[None, :], [tf.shape(data['guide_tokens'])[0], 1])
+        x = tf.concat([x, tf.cast(guide_position, tf.float32)], axis=1)
+
+        # concatenate and log available non-sequence features
+        x = self.concatenate_non_sequence_features(data, x, scalar_feats)
+
+        # target values
+        y = data['target_lfc']
+
+        return x, y
+
+    def parse_input_scores(self, x, scores):
+        return pd.DataFrame()
+
+
+class TranscriptTransformer(TranscriptEmbeddingModel):
+    def __init__(self, target_len: int, guide_len: int, use_guide_seq: bool, **kwargs):
+        TranscriptEmbeddingModel.__init__(self, target_len, guide_len, use_guide_seq)
+
+        num_heads = kwargs.get('num_heads') or 10
+        dim_model = kwargs.get('dim_model') or 16
+        dim_hidden = kwargs.get('dim_hidden') or 16
+        self.model = tf.keras.Sequential(name='TranscriptTransformer', layers=[
+            layers.SequenceSequentialWithNonSequenceBypass(
+                input_parser=self.input_parser,
+                sequence_layers=[
+                    layers.NucleotideAndPositionEncoding(target_len, embedding_dim=dim_model),
+                    layers.TransformerLayer(num_heads, dim_model, dim_hidden, num_layers=3, dropout_rate=0.25),
+                ]),
+            tf.keras.layers.Dense(units=32, activation='elu'),
+            tf.keras.layers.Dropout(0.1),
             tf.keras.layers.Dense(1, activation='linear')
         ])
 
 
 def build_model(name, target_len, context_5p, context_3p, use_guide_seq, loss_fn, debug=False, **kwargs):
     if name == 'Tiger1D':
-        model = Tiger1D(target_len, context_5p, context_3p, use_guide_seq)
+        model = Tiger1D(target_len, context_5p, context_3p, use_guide_seq, **kwargs)
         optimizer = tf.optimizers.Adam(1e-3)
     elif name == 'Tiger2D':
-        model = Tiger2D(target_len, context_5p, context_3p, use_guide_seq)
+        model = Tiger2D(target_len, context_5p, context_3p, use_guide_seq, **kwargs)
         optimizer = tf.optimizers.Adam(1e-3)
+    elif name == 'TargetSequenceWithRBP':
+        model = TargetSequenceWithRBP(target_len, context_5p, context_3p, **kwargs)
+        optimizer = tf.optimizers.Adam(1e-3)
+    # elif name == 'TranscriptTransformer':
+    #     model = TranscriptTransformer(target_len, guide_len, use_guide_seq, **kwargs)
+    #     optimizer = tf.optimizers.Adam(5e-4)
     else:
         raise NotImplementedError
     model.model.compile(optimizer=optimizer, loss=loss_fn, run_eagerly=debug)
@@ -130,8 +258,8 @@ def build_model(name, target_len, context_5p, context_3p, use_guide_seq, loss_fn
     return model
 
 
-def train_model(model, train_data, valid_data, batch_size=2048, verbose=0):
-    model.model.fit(*model.pack_inputs(train_data), validation_data=model.pack_inputs(valid_data),
+def train_model(model, train_data, valid_data, batch_size=2048, verbose=0, **kwargs):
+    model.model.fit(*model.pack_inputs(train_data, **kwargs), validation_data=model.pack_inputs(valid_data, **kwargs),
                     batch_size=batch_size, epochs=2000, verbose=verbose,
                     callbacks=[PerformanceCallback(same_line=not verbose, early_stop_patience=100)])
     return model
@@ -141,7 +269,7 @@ def test_model(model, valid_data):
 
     # keep relevant information
     df = pd.DataFrame()
-    for key in ['gene', 'target_seq', 'guide_seq', 'guide_type', 'target_lfc', 'target_label']:
+    for key in ['gene', 'target_seq', 'guide_id', 'guide_seq', 'guide_type', 'target_lfc', 'target_label']:
         if key in valid_data.keys():
             df[key] = valid_data[key].numpy()
             if df[key].dtype == object:
@@ -149,7 +277,7 @@ def test_model(model, valid_data):
 
     # generate predictions
     x, _ = model.pack_inputs(valid_data)
-    df['predicted_lfc'] = model.model.predict(x)
+    df['predicted_lfc'] = model.model.predict(x, verbose=0)
 
     # if LFCs were predicted, join perfect match parents to each of their children (and themselves)
     if len(set(df['guide_type'].unique()) - {'PM'}) > 0 and 'predicted_lfc' in df.columns:

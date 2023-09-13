@@ -43,8 +43,8 @@ predictions = pd.DataFrame()
 for fold in set(data['fold'].unique()) - {'training'}:
 
     # prepare training and validation data
-    train_data = model_inputs(data[data.fold != fold], args.context, available_features)
-    valid_data = model_inputs(data[data.fold == fold], args.context, available_features)
+    train_data = model_inputs(data[data.fold != fold], args.context, scalar_feats=available_features)
+    valid_data = model_inputs(data[data.fold == fold], args.context, scalar_feats=available_features)
 
     # train model
     if args.seed is not None:
@@ -56,6 +56,7 @@ for fold in set(data['fold'].unique()) - {'training'}:
                         use_guide_seq=args.use_guide_seq,
                         loss_fn=args.loss,
                         debug=args.debug,
+                        output_fn=normalizer.output_fn,
                         **args.kwargs)
     model = train_model(model, train_data, valid_data, args.batch_size)
 

@@ -8,35 +8,75 @@ from sklearn.metrics import auc, precision_recall_curve, roc_curve, roc_auc_scor
 from roc_comparison.compare_auc_delong_xu import delong_roc_test, delong_roc_variance
 
 
+def string_to_dict(dict_string: str):
+    kwargs = json.loads(dict_string.replace('\'', '\"'))
+    for key, value in kwargs.items():
+        if kwargs[key] == 'True':
+            kwargs[key] = True
+        if kwargs[key] == 'False':
+            kwargs[key] = False
+        if isinstance(kwargs[key], list):
+            kwargs[key] = set(kwargs[key])
+    return kwargs
+
+
 def common_parser_arguments():
 
     # common arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=2048, help='tensorflow batch size')
-    parser.add_argument('--context', type=str, default='(1,1)', help='amount of target sequence context')
+    parser.add_argument('--context', type=str, default=None, help='amount of target sequence context')
     parser.add_argument('--dataset', type=str, default='off-target', help='which dataset to use')
     parser.add_argument('--debug', action='store_true', default=False, help='debug mode will run models eagerly')
-    parser.add_argument('--fig_ext', type=str, default='.svg', help='which file extension to use when saving plots')
-    parser.add_argument('--filter_method', type=str, default='MinActiveRatio', help='gene filtering method')
-    parser.add_argument('--holdout', type=str, default='guides', help='how to assemble cross-validation folds')
+    parser.add_argument('--fig_ext', type=str, default='.pdf', help='which file extension to use when saving plots')
+    parser.add_argument('--filter_method', type=str, default=None, help='gene filtering method')
+    parser.add_argument('--holdout', type=str, default='targets', help='how to assemble cross-validation folds')
     parser.add_argument('--indels', action='store_true', default=False, help='include targets with indels')
-    parser.add_argument('--kwargs', type=str, default='{}', help='model hyper-parameters')
-    # parser.add_argument('--kwargs', type=str, default="{'features': []}")
+    parser.add_argument('--kwargs', type=str, default=None, help='model hyper-parameters')
     parser.add_argument('--loss', type=str, default='log_cosh', help='training loss function')
-    parser.add_argument('--min_active_ratio', type=float, default=0.13, help='ratio of active guides to keep a gene')
-    parser.add_argument('--model', type=str, default='Tiger1D', help='model name')
-    parser.add_argument('--normalization', type=str, default='FrequentistQuantile', help='normalization method')
-    parser.add_argument('--nt_quantile', type=float, default=0.01, help='active guide non-targeting quantile threshold')
+    parser.add_argument('--min_active_ratio', type=float, default=None, help='ratio of active guides to keep a gene')
+    parser.add_argument('--model', type=str, default=None, help='model name')
+    parser.add_argument('--normalization', type=str, default=None, help='normalization method')
+    parser.add_argument('--normalization_kwargs', type=str, default=None, help='normalization parameters')
+    parser.add_argument('--nt_quantile', type=float, default=None, help='active guide non-targeting quantile threshold')
     parser.add_argument('--pm_only', action='store_true', default=False, help='use only perfect match guides')
     parser.add_argument('--use_guide_seq', action='store_true', default=False, help='use guide sequence for PM only')
 
     return parser
 
 
-def parse_common_arguments(parser: argparse.ArgumentParser):
+def parse_common_arguments(parser: argparse.ArgumentParser, dataset_parameter_override: str = None):
 
     # parse arguments
     args = parser.parse_args()
+
+    # dataset-specific defaults
+    dataset = dataset_parameter_override or args.dataset
+    if dataset == 'off-target':
+        args.context = args.context or '(1,1)'
+        args.filter_method = args.filter_method or 'NoFilter'
+        args.kwargs = args.kwargs or '{}'  # "{'features': []}"
+        args.min_active_ratio = args.min_active_ratio or 0.1
+        args.model = args.model or 'Tiger2D'
+        args.normalization = args.normalization or 'FrequentistQuantile'
+        args.normalization_kwargs = args.normalization_kwargs or "{'q_loc': 50, 'q_neg': 10, 'q_pos': 90}"
+        args.nt_quantile = args.nt_quantile or 0.01
+    elif dataset == 'junction':
+        args.context = args.context or '(0,5)'
+        args.filter_method = args.filter_method or 'MinActiveRatio'
+        args.kwargs = args.kwargs or '{}'  # "{'features': []}"
+        args.min_active_ratio = args.min_active_ratio or 0.15
+        args.model = args.model or 'Tiger1D'
+        args.normalization = args.normalization or 'No'
+        args.normalization_kwargs = args.normalization_kwargs or '{}'
+        args.nt_quantile = args.nt_quantile or 0.01
+    else:
+        assert args.context is not None
+        assert args.filter_method is not None
+        assert args.kwargs is not None
+        assert args.min_active_ratio is not None
+        assert args.model is not None
+        assert args.nt_quantile is not None
 
     # convert context string to the appropriate type
     if hasattr(args, 'context'):
@@ -53,14 +93,9 @@ def parse_common_arguments(parser: argparse.ArgumentParser):
 
     # process kwargs string descriptor into a dictionary that is usable by python
     if hasattr(args, 'kwargs'):
-        args.kwargs = json.loads(args.kwargs.replace('\'', '\"'))
-    for key, value in args.kwargs.items():
-        if args.kwargs[key] == 'True':
-            args.kwargs[key] = True
-        if args.kwargs[key] == 'False':
-            args.kwargs[key] = False
-        if isinstance(args.kwargs[key], list):
-            args.kwargs[key] = set(args.kwargs[key])
+        args.kwargs = string_to_dict(args.kwargs)
+    if hasattr(args, 'normalization_kwargs'):
+        args.normalization_kwargs = string_to_dict(args.normalization_kwargs)
 
     # if dataset has mismatches guides, then guide sequence is required
     if not args.pm_only and set(load_data(args.dataset)[0]['guide_type'].unique()) != {'PM'}:
@@ -76,6 +111,11 @@ def data_directory(pm_only: bool, indels: bool):
         return 'indels'
     else:
         return 'no_indels'
+
+
+def total_least_squares_slope(x: np.array, y: np.array):
+    u, s, v = np.linalg.svd(np.stack([x, y], axis=-1), full_matrices=False)
+    return -v[1, 0] / v[1, 1]
 
 
 def regression_metrics(target_lfc, predicted_lfc=None, predicted_label_likelihood=None):
@@ -97,6 +137,9 @@ def regression_metrics(target_lfc, predicted_lfc=None, predicted_label_likelihoo
     target_lfc = target_lfc[~i_nan]
     predicted_lfc = predicted_lfc[~i_nan]
 
+    # compute calibration metrics
+    slope = total_least_squares_slope(predicted_lfc, target_lfc)
+
     # compute metrics and their standard errors
     n = len(target_lfc)
     pearson = pearsonr(target_lfc, predicted_lfc)[0]
@@ -104,7 +147,7 @@ def regression_metrics(target_lfc, predicted_lfc=None, predicted_label_likelihoo
     spearman = spearmanr(target_lfc, predicted_lfc)[0]
     spearman_err = np.sqrt((1 - spearman ** 2) / (n - 2))
 
-    return pearson, pearson_err, spearman, spearman_err
+    return slope, pearson, pearson_err, spearman, spearman_err
 
 
 def roc_and_prc_from_lfc(target_label, predicted_label_likelihood=None, predicted_lfc=None):
@@ -115,13 +158,13 @@ def roc_and_prc_from_lfc(target_label, predicted_label_likelihood=None, predicte
     :param predicted_lfc: predicted LFC
     :return: ROC and PRC
     """
-    if target_label is None:
+    if target_label is None or len(np.unique(target_label)) != 2:
         return (None, None), (None, None)
     assert not (predicted_label_likelihood is None and predicted_lfc is None)
 
     # if predicted labels are absent, use negative LFC (a highly negative LFC implies a positive label)
     if predicted_label_likelihood is None:
-        predicted_label_likelihood = -predicted_lfc
+        predicted_label_likelihood = np.sign(pearsonr(predicted_lfc, target_label)[0]) * predicted_lfc
 
     # ROC and PRC values
     fpr, tpr, _ = roc_curve(target_label, predicted_label_likelihood)
@@ -139,7 +182,7 @@ def classification_metrics(target_label, predicted_label_likelihood=None, predic
     :param n_bootstraps: number of bootstraps used to estimate AUPRC standard error
     :return: AUROC, AUPRC
     """
-    if target_label is None:
+    if target_label is None or len(np.unique(target_label)) != 2:
         return None, None, None, None
 
     # ROC and PRC
@@ -151,7 +194,7 @@ def classification_metrics(target_label, predicted_label_likelihood=None, predic
 
     # compute AUROC standard errors
     if predicted_label_likelihood is None:
-        predicted_label_likelihood = -predicted_lfc
+        predicted_label_likelihood = np.sign(pearsonr(predicted_lfc, target_label)[0]) * predicted_lfc
     auroc_delong, auroc_var = delong_roc_variance(target_label.to_numpy().astype(float),
                                                   predicted_label_likelihood.to_numpy())
     auroc_err = auroc_var ** 0.5
@@ -183,7 +226,7 @@ def measure_performance(df_tap, index=None, silence=False):
                    'predicted_label_likelihood': df_tap.get('predicted_label_likelihood')}
 
     # compute metrics
-    r, r_err, rho, rho_err = regression_metrics(df_tap['target_lfc'], **predictions)
+    slope, r, r_err, rho, rho_err = regression_metrics(df_tap['target_lfc'], **predictions)
     auroc, auroc_err, auprc, auprc_err = classification_metrics(df_tap.get('target_label'), **predictions)
 
     # generate ROC and PRC curves
@@ -191,6 +234,7 @@ def measure_performance(df_tap, index=None, silence=False):
 
     # pack performance into a dataframe
     df = pd.DataFrame({
+        'Slope': [slope],
         'Pearson': [r],
         'Pearson err': [r_err],
         'Spearman': [rho],

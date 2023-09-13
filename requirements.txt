@@ -5,4 +5,5 @@ seaborn==0.12.1
 shap==0.41.0
 sklearn
 statsmodels==0.13.5
+streamlit==1.21.0
 tensorflow-probability==0.19.0

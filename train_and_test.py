@@ -11,6 +11,7 @@ from normalization import get_normalization_object
 parser = utils.common_parser_arguments()
 parser.add_argument('--mm_only', action='store_true', default=False, help='use only mismatched guides')
 parser.add_argument('--seed', type=int, default=None, help='random number seed')
+parser.add_argument('--seq_only', action='store_true', default=False, help='sequence only model')
 parser.add_argument('--test_dataset', type=str, default=None, help='optional held out test set')
 parser.add_argument('--test_filter_method', type=str, default='NoFilter', help='gene filtering method for test set')
 args = utils.parse_common_arguments(parser)
@@ -27,7 +28,7 @@ available_features = set(SCALAR_FEATS).intersection(set(data.columns))
 data['fold'] = np.random.choice(np.array(['training', 'validation']), p=[0.9, 0.1], size=len(data))
 
 # normalize data
-normalizer = get_normalization_object(args.normalization)(data=data)
+normalizer = get_normalization_object(args.normalization)(data=data, **args.normalization_kwargs)
 data = normalizer.normalize(data)
 
 # set up test set similarly, if requested
@@ -36,7 +37,7 @@ if args.test_dataset:
     test_data = label_and_filter_data(*test_data, args.nt_quantile, args.test_filter_method)
     available_features = available_features.intersection(set(test_data.columns))
     if set(LFC_COLS).issubset(test_data.columns):
-        test_set_normalizer = get_normalization_object(args.normalization)(data=test_data)
+        test_set_normalizer = get_normalization_object(args.normalization)(data=test_data, **args.normalization_kwargs)
         test_data = test_set_normalizer.normalize(test_data)
     else:
         test_set_normalizer = None
@@ -50,11 +51,12 @@ if args.mm_only:
     test_data = None or test_data[test_data.guide_type != 'PM']
 
 # print which non-scalar features will be used
+available_features = set() if args.seq_only else available_features
 print('Non-scalar features to be used:', available_features)
 
 # assemble model inputs
-train_data = model_inputs(data[data.fold == 'training'], args.context, available_features)
-valid_data = model_inputs(data[data.fold == 'validation'], args.context, available_features)
+train_data = model_inputs(data[data.fold == 'training'], args.context, scalar_feats=available_features)
+valid_data = model_inputs(data[data.fold == 'validation'], args.context, scalar_feats=available_features)
 
 # build, train, and test model
 if args.seed is not None:
@@ -66,6 +68,7 @@ model = build_model(name=args.model,
                     use_guide_seq=args.use_guide_seq,
                     loss_fn=args.loss,
                     debug=args.debug,
+                    output_fn=normalizer.output_fn,
                     **args.kwargs)
 model = train_model(model, train_data, valid_data, args.batch_size)
 df_tap = test_model(model, valid_data)
@@ -87,7 +90,7 @@ if test_data is not None:
 
     # get normalized predictions
     normalized_columns = ['target_lfc', 'target_pm_lfc', 'predicted_lfc', 'predicted_pm_lfc']
-    df_tap = test_model(model, model_inputs(test_data, args.context, available_features))
+    df_tap = test_model(model, model_inputs(test_data, args.context, scalar_feats=available_features))
 
     # if we have a test set normalizer
     if test_set_normalizer is not None:
