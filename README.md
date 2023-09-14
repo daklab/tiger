@@ -16,7 +16,7 @@ Our `Dockerfile` utilizes this image and additionally installs the python packag
 
 Our repository contains two submodules:
 - [Open source code](https://github.com/yandexdataschool/roc_comparison/) for ROC analysis. We submodule their code and license in the `roc_comparison` directory.
-- [Our hugging face code](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging_face` directory.
+- [Our online TIGER tool on hugging face](https://huggingface.co/spaces/Knowles-Lab/tiger) has saved model weights and a script to generate predictions locally. We submodule this code in the `hugging_face` directory.
 
 The `hugging_face` repository uses [Git LFS](https://git-lfs.com/) to store model weights.
 One must have Git LFS properly installed to correctly pull model parameters.
@@ -27,19 +27,22 @@ git clone --recursive https://github.com/daklab/tiger.git
 
 ## Generating Predictions
 
-[Our online TIGER tool](https://huggingface.co/spaces/Knowles-Lab/tiger) is the simplest way to identify the ten most effective guides for a transcript.
-There, one can enter a single transcript manually or upload a fasta file with multiple transcripts.
-This web tool also provides the option to identify off-target effects (up to three nucleotide substitutions) or all single-mismatch titration candidates for each transcripts' top ten guides.
-Checking for off-target effects slows computation time--we check all of gencode v19's coding and lncRNA transcripts for potential off-target effects.
+[Our online TIGER tool](https://huggingface.co/spaces/Knowles-Lab/tiger) is the simplest way to generate predictions.
+There, one can enter a single transcript manually or upload a fasta file with multiple transcripts and select one of three modes:
+1) Score all possible gRNAs per transcript.
+2) Identify and score the top ten guides per transcript. This mode supports off-target checking for up to three nucleotide substitutions against all gencode (v19) coding and lncRNA transcripts.
+3) Titration mode identifies and scores the top ten guides per transcript and reports and scores all single-mismatch titration candidates for each transcripts' top ten guides.
 
 For faster performance, one can fork our hugging face repository and pay for upgraded compute.
 Alternatively, for those with local GPU resources, one can call `tiger.py` (located in the `hugging_face` submodule directory of this github repository) locally:
 ```
-python tiger.py --fasta_path <path to a directory of fasta files> [--check_off_targets]
+python tiger.py --mode <all, top_guides, or titration> --fasta_path <path to a directory of fasta files> [--check_off_targets]
 ```
-The `--fasta_path` must be a directory of fasta files, where each file has one or more transcripts.
-Upon completion, `on_target.csv` (located in the `hugging_face` submodule directory of this GitHub repository) will contain the ten most effective guides per transcript.
-If the `--check_off_targets` was used, `off_target.csv` (located in the `hugging_face` submodule directory) will contain potential off-target effects (up to three nucleotide substitutions) for all guides in `on_target.csv`.
+The required mode argument has three valid options:`all`, `top_guides`, or `titration`, which correspond to the modes described above.
+The required `--fasta_path` argument must be a directory of fasta files, where each file has one or more transcripts.
+Upon completion, `on_target.csv` (located in the `hugging_face` submodule directory of this GitHub repository) will contain either all or the ten most effective guides per transcript depending on the selected mode.
+If titration mode was selected, then `titration.csv` will contain all single mismatches for the guides in `on_target.csv`.
+If the optional `--check_off_targets` was enabled, `off_target.csv` will contain potential off-target effects (up to three nucleotide substitutions) for all guides in `on_target.csv`.
 
 ### Versioning and Training of Online TIGER Tool
 
