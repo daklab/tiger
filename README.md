@@ -4,6 +4,8 @@ This code repository accompanies [our Nature Biotechnology manuscript](http://sa
 Please consider citing us:
 > **[Prediction of on-target and off-target activity of CRISPR–Cas13d guide RNAs using deep learning](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf).** Wessels, H.-H.<sup>\*</sup>, Stirn, A.<sup>\*</sup>, Méndez-Mancilla, A., Kim, E. J., Hart, S. K., Knowles, D. A.<sup>#</sup>, & Sanjana, N. E.<sup>#</sup> *Nature Biotechnology* (2023).  [https://doi.org/10.1038/s41587-023-01830-8](https://doi.org/10.1038/s41587-023-01830-8)
 
+> **[Cas13d-mediated isoform-specific RNA knockdown with a unified computational and experimental toolbox](https://www.biorxiv.org/content/10.1101/2023.09.12.557474v1).** Schertzer, M. D., Stirn, A., Isaev, K., Pereira, L., Das, A., Harbison, C., Park, S. H., Wessels, H.-H., Sanjana, N. E., & Knowles, D. A. *Bioarxiv* (2023).
+
 ## Requirements
 
 This repository utilizes TensorFlow as its deep learning framework.
