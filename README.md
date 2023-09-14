@@ -1,6 +1,6 @@
 # Targeted Inhibition of Gene Expression via gRNA Design (TIGER)
 
-This code repository accompanies [our Nature Biotechnology manuscript](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf) as well as our recent preprint.
+This code repository accompanies [our Nature Biotechnology manuscript](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf) as well as [our recent preprint](https://www.biorxiv.org/content/10.1101/2023.09.12.557474v1).
 Please consider citing us:
 > **[Prediction of on-target and off-target activity of CRISPR–Cas13d guide RNAs using deep learning](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf).** Wessels, H.-H.<sup>\*</sup>, Stirn, A.<sup>\*</sup>, Méndez-Mancilla, A., Kim, E. J., Hart, S. K., Knowles, D. A.<sup>#</sup>, & Sanjana, N. E.<sup>#</sup> *Nature Biotechnology* (2023).  [https://doi.org/10.1038/s41587-023-01830-8](https://doi.org/10.1038/s41587-023-01830-8)
 
@@ -36,7 +36,7 @@ Alternatively, for those with local GPU resources, one can call `tiger.py` (loca
 python tiger.py --fasta_path <path to a directory of fasta files> [--check_off_targets]
 ```
 The `--fasta_path` must be a directory of fasta files, where each file has one or more transcripts.
-Upon completion, `on_target.csv` (located in the `hugging_face` submodule directory of this github repository) will contain the ten most effective guides per transcript.
+Upon completion, `on_target.csv` (located in the `hugging_face` submodule directory of this GitHub repository) will contain the ten most effective guides per transcript.
 If the `--check_off_targets` was used, `off_target.csv` (located in the `hugging_face` submodule directory) will contain potential off-target effects (up to three nucleotide substitutions) for all guides in `on_target.csv`.
 
 ### Versioning and Training of Online TIGER Tool
@@ -69,4 +69,4 @@ We used an NVIDIA 3090 RTX card for all experiments.
 
 To reproduce results from [our Nature Biotechnology manuscript](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf), please see and run 
 To reproduce our manuscript's figures please run `tiger_experiments.sh`, which has our utilized random number seeds.
-To reproduce results from our recent preprint, please see and run `junction_experiments.sh`, which also has our utilized random number seeds.)
+To reproduce results from [our recent preprint](https://www.biorxiv.org/content/10.1101/2023.09.12.557474v1), please see and run `junction_experiments.sh`, which also has our utilized random number seeds.
