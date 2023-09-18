@@ -72,5 +72,5 @@ Please see our methods section for additional collection details.
 While we enable TensorFlow's GPU determinism, exact reproducibility may vary depending on computing resources (e.g. GPU model/resources, CPU instead of GPU, etc...).
 We used an NVIDIA 3090 RTX card for all experiments.
 
-To reproduce results from [our Nature Biotechnology manuscript](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf), please see and run `tiger_experiments.sh`, which has our utilized random number seeds.
+To reproduce results from [our Nature Biotechnology manuscript](http://sanjanalab.org/reprints/WesselsStirn_NBT_2023.pdf), please checkout the `NBT-submission` tag and run `tiger_experiments.sh`, which has our utilized random number seeds.
 To reproduce results from [our recent preprint](https://www.biorxiv.org/content/10.1101/2023.09.12.557474v1), please see and run `junction_experiments.sh`, which also has our utilized random number seeds.
